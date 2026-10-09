@@ -273,6 +273,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             prefix=add_prefix("experts", prefix),
             routing_method_type=RoutingMethodType.Renormalize,
         )
+        from sglang.srt.distributed.device_communicators.cam_detour import (
+            trace_moe_dispatcher,
+        )
+        trace_moe_dispatcher(self.experts)
 
         # Router gate: description-driven quant. Only the offline ModelSlim path
         # (which carries a per-layer quant_model_description) may quantise the
@@ -1013,6 +1017,12 @@ class Qwen3MoeForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.pp_group = get_parallel().pp_group
+        # Opt-in experiment only; all eight local CAM memory owners rendezvous
+        # before warmup, including workers of the other engine / KV pool.
+        from sglang.srt.distributed.device_communicators.cam_detour import (
+            initialize_qwen3_cam,
+        )
+        initialize_qwen3_cam()
         self.config = config
         self.quant_config = quant_config
         self.model = Qwen3MoeModel(

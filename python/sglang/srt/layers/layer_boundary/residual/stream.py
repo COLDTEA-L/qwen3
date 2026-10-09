@@ -29,6 +29,11 @@ class DeclaredSum(msgspec.Struct, frozen=True):
     group: SumGroup
 
     def complete(self, value):
+        if self.group is SumGroup.ATTN_TP:
+            from sglang.srt.distributed.communication_op import (
+                attention_tensor_model_parallel_all_reduce,
+            )
+            return attention_tensor_model_parallel_all_reduce(value)
         return _sum_group(self.group).all_reduce(value)
 
 

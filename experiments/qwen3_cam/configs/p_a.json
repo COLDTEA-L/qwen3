@@ -1,0 +1,8 @@
+{
+  "process_rank_to_cam": {"0": 0, "1": 1, "2": 2, "3": 3},
+  "groups": [[0, 1, 2, 3]],
+  "server_addr": "127.0.0.1:10067",
+  "comm_id": 7,
+  "buffer_mb": 512,
+  "chunk_bytes": 8388608
+}

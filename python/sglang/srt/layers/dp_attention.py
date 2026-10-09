@@ -1215,7 +1215,13 @@ def dp_reduce_scatterv_async(
 
 
 def attn_tp_reduce_scatter_tensor(output: torch.Tensor, input: torch.Tensor):
-    return get_parallel().attn_tp_group.reduce_scatter_tensor(output, input)
+    from sglang.srt.distributed.device_communicators.cam_detour import (
+        maybe_cam_reduce_scatter,
+    )
+
+    group = get_parallel().attn_tp_group
+    if not maybe_cam_reduce_scatter(output, input, group):
+        return group.reduce_scatter_tensor(output, input)
 
 
 def attn_cp_reduce_scatter_tensor(output: torch.Tensor, input: torch.Tensor):
@@ -1223,7 +1229,11 @@ def attn_cp_reduce_scatter_tensor(output: torch.Tensor, input: torch.Tensor):
 
 
 def attn_tp_all_reduce(input: torch.Tensor):
-    return get_parallel().attn_tp_group.all_reduce(input)
+    from sglang.srt.distributed.communication_op import (
+        attention_tensor_model_parallel_all_reduce,
+    )
+
+    return attention_tensor_model_parallel_all_reduce(input)
 
 
 def attn_tp_all_gather_into_tensor(output: torch.Tensor, input: torch.Tensor):

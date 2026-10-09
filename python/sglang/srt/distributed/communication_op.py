@@ -119,7 +119,11 @@ def attn_cp_tp_broadcast_pyobj(data: List[Any]) -> List[Any]:
 
 def attention_tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across attention parallel group."""
-    return get_attn_tp_group().all_reduce(input_)
+    from .device_communicators.cam_detour import maybe_cam_all_reduce
+
+    group = get_attn_tp_group()
+    result = maybe_cam_all_reduce(input_, group)
+    return group.all_reduce(input_) if result is None else result
 
 
 def attention_tensor_model_parallel_quant_all_reduce(
