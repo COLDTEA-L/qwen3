@@ -68,6 +68,81 @@ AllReduce 每个 chunk 的原生 AllGather 提供组内进度约束。ReduceScat
 
 运行数据已通过实验目录 .gitignore 排除，不提交私有地址、权重和采样文件。下文区分宿主机和容器内操作；宿主机中的 export 不会自动进入 docker exec 新终端。
 
+### 4.0 本次回传的环境记录与当前可执行路线
+
+用户本次粘贴的记录包含 A 的 docker ps/ps -a、主机 link/IPv4/route；末尾只有 B 的地址标题，没有 B 的查询输出。ss -ltn 也只有命令行，没有结果。因此下表区分“已观察到”和“仍待验证”，不能把附件当成两机完整验收。
+
+| 项目 | 当前观察/选择 | 还需什么证据 |
+| --- | --- | --- |
+| A 主机地址、账号 | 主机 IP 已提供，shell 显示账号 yuanwenliu；具体地址存私有 hosts.env | 到 B 的实际路由、SSH/目录权限 |
+| B 主机地址 | 用户标注了地址；与 A 不是同一网段，不擅自改成 A 所在网段 | 确认地址无笔误；补 B 的 route/link/IPv4 和回程路由 |
+| A 控制网候选 | enp67s0f5 为 UP，承载 A 的主机 IP 和默认路由 | ip route get 到 B；对应地址和接口双向验证 |
+| A 的其他 UP 接口 | enp67s0f6v0 至 v7，有各自 IPv4 和同前缀路由 | 不能凭后缀映射 NPU 0—7；需 hccn_tool 的逐卡 IP/link |
+| A 的 enp189s0f0 至 f3 | DOWN / NO-CARRIER | 当前不作为控制口候选；不擅自启用 |
+| SGLang 优先候选 | quay.io/ascend/sglang:v0.5.13.post1-cann9.0.0-910b，A 有两个 running 容器引用它 | 镜像架构/digest、容器内实际 CANN/TorchNPU/kernel/MemFabric/DeepEP |
+| CAM/Detour 备选环境 | A 有独立 detour/CAM 类运行容器，部分标签注明 CANN8.3 | 查询实际算子 wheel、CANN/PyTorch ABI；不能与 SGLang9.0 库目录直接混用 |
+| 其他框架镜像 | 存在 vLLM/MindIE/纯 CANN 环境 | 不优先作为 SGLang 实验基础；除非另行确认依赖 |
+| 芯片、HBM、CPU 架构、OS、driver、NPU topo | 本次未提供 | 两机补第 4.1 节；不能由镜像名字推断宿主机架构/芯片 |
+| 空闲卡和端口、/ssd_2 空间 | 本次未提供；运行容器很多 | npu-smi、ss -ltn、df；由所有者/管理员确认维护窗口 |
+
+真实内网 IP 不写入 Git 跟踪的 README，已在开发端创建被 .gitignore 排除的 experiments/qwen3_cam/runtime-config/hosts.env；可由用户从开发端安全复制到两台 A2 的相同相对路径。它不会随 git push/clone 携带，不使用 git add -f。公开文档只保留角色别名和接口/镜像信息。
+
+若从 GitHub 新 clone，在编辑器中新建 runtime-config/hosts.env，填用户实际地址和各机接口；只包含可信的 export 行。如下是公开模板，不是可原样执行的地址：
+
+```bash
+export A_IP=实际A机地址
+export B_IP=实际B机地址
+export HOST_IF_A=enp67s0f5
+export HOST_IF_B=实际B机控制网接口
+export A2_CANDIDATE_IMAGE=quay.io/ascend/sglang:v0.5.13.post1-cann9.0.0-910b
+```
+
+执行顺序为：两机补宿主机信息 → 对获准的 SGLang 候选查内部版本 → 确认当前源码与候选栈的差异 → 确定兼容镜像/适配 → 新建独立实验容器 → 原生服务与 CAM 验证。A2_CANDIDATE_IMAGE 仅是优先查询对象，不等于第 4.4 节可以直接使用的 A2_BASE_IMAGE。
+
+候选标签是 SGLang v0.5.13.post1 / CANN9.0 / 910b，当前实验代码是 f620d73 主线快照。不能因 torch.npu.device_count()==8 就认为版本兼容，也不把实验分支直接 switch 到 v0.5.13 来丢掉接入。若该栈不支持当前代码，要基于明确版本做适配，或在独立镜像中使用已验证的新栈，再重复验收；此文档尚未宣称适配完成。
+
+#### 4.0.1 A、B 分别补哪些信息
+
+两机先按第 4.1 节运行完整宿主机查询，提供两份输出。至少补 CPU/OS、NPU 型号/HBM/topo、driver、Docker 版本/架构/镜像 digest、磁盘、端口；再补第 4.2 节的每卡 HCCN IP/link。以下在自己的宿主机执行，仅加载已核对过的私有配置，不修改网络：
+
+```bash
+# 两台 A2 均执行；先创建/复制并核对可信 hosts.env
+source /ssd_2/sglang/experiments/qwen3_cam/runtime-config/hosts.env
+# A 宿主机
+ip route get "$B_IP"
+ip -details link show dev enp67s0f5
+ethtool enp67s0f5
+# B 宿主机，另开终端执行；不要把 A 的接口名直接套给 B
+ip -br -4 addr
+ip -br link
+ip -4 route
+ip route get "$A_IP"
+```
+
+跨网段不代表一定不通或不能做 RDMA；但主机路由、NPU 数据网的路由/交换机条件是两回事，需要分别验证。不要根据 A 的默认路由就直接写死 B 的接口。虚拟接口地址不用于替代当前 A_IP/B_IP，也不自动当作各张 NPU 的 RoCE IP。
+
+#### 4.0.2 A 上优先查哪个容器
+
+A 的两个 SGLang 候选名为 dyt_test、uds_ljq，引用相同镜像标签；先确认哪个是自己或已获准查询的容器，**只查一个**即可。它们的所有者、卡占用和可写层改动还未知，不因名字/Up 时长就复用其进程。下面 CANDIDATE 的示例名须经所有者允许后使用：
+
+```bash
+# A 宿主机；先确认权限，二选一，不批量查询他人容器
+export CANDIDATE=dyt_test
+# 或 export CANDIDATE=uds_ljq
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh "$CANDIDATE"
+```
+
+脚本会给 CANN set_env.sh 的候选路径。若默认 shell 未加载 CANN，只在核对实际可信路径后加第二参数重查：
+
+```bash
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh \
+  "$CANDIDATE" /usr/local/Ascend/ascend-toolkit/set_env.sh
+```
+
+若需要补 CAM 现有构建信息，再经所有者允许选一个 detour_test 或 CAM 类容器，按相同脚本查询，另标为“CAM 参考环境”，不混成同一套服务依赖。底层算子是否已支持当前 CANN9.0 仍要重新构建/验收；不能把 CANN8.3 的 .so/wheel 复制进 9.0 环境就假定能用。
+
+没有获准进入任何候选时，只提供容器/镜像配置清单，不做 docker exec；不启动停止状态容器，也不修改正在运行的业务容器。B 尚无清单，需独立查询，不默认 B 也有相同镜像。
+
 ### 4.1 先查询两机信息，不先安装或升级
 
 **A、B 两台 A2 宿主机各执行一次**，分别提供输出；没有工具时保留报错，不为查询改系统配置。
@@ -109,7 +184,7 @@ bash /ssd_2/sglang/experiments/qwen3_cam/collect_machine_info.sh
 | 同机拓扑、peer IPC 可达性 | topo；之后 8 rank CAM 冒烟 | 当前物理 rank/绕行实现能否使用 |
 | 已有可用 A2 镜像/容器 | 完整 tag/digest 和容器名 | 固定基础软件栈 |
 | 容器中的 CANN、TorchNPU、DeepEP、kernel、MemFabric/MemCache | 第 4.5 节查询 | 本源码快照是否需要适配 |
-| 两机主机 IP/网卡名、SSH 用户 | ip route get；用户说明 | rendezvous、HTTP、store、传文件 |
+| 两机主机 IP/网卡名、SSH 用户 | A 地址和账号已提供；B 地址已标注，A 接口为候选；仍需 route get/B 完整输出 | rendezvous、HTTP、store、传文件 |
 | 各 8 张 NPU 的 IP/link 和交换机环境 | 第 4.2 节；管理员信息 | EP8 和跨机 KV 的设备 RDMA |
 | 其他业务与空闲端口 | ss -ltn；用户说明维护窗口 | 避免占用他人设备和缓存域 |
 
@@ -481,14 +556,21 @@ torchrun --nproc_per_node=8 --master_port=29611 \
 
 ## 7 第四步先部署原生 PD
 
-先使用 off 模式验证两机模型、EP8 和真实 P 到 D 的传输。各终端都设置下列变量，替换真实地址。HCCL_SOCKET_IFNAME 和 GLOO_SOCKET_IFNAME 是主机控制网络接口，不代表已经配置好了各 NPU 的 RoCE 数据网络。
+先使用 off 模式验证两机模型、EP8 和真实 P 到 D 的传输。各容器终端先加载用户已核对的私有 hosts.env；本次 A 的控制口候选为 enp67s0f5，B 的接口仍未提供，不用 A 的接口名猜 B。HCCL_SOCKET_IFNAME 和 GLOO_SOCKET_IFNAME 是主机控制网络接口，不代表已经配置好了各 NPU 的 RoCE 数据网络。必须先完成第 4.0 节查询和兼容性门槛。
 
 ```bash
-export A_IP=机器A的IP
-export B_IP=机器B的IP
+source /ssd_2/sglang/experiments/qwen3_cam/runtime-config/hosts.env
+export HOST_ROLE=A
+# 上一行在 A 的终端用 A；在 B 的终端必须改为 B
+: "${A_IP:?请先填A的地址}"
+: "${B_IP:?请先填并确认B的地址}"
+case "$HOST_ROLE" in
+  A) : "${HOST_IF_A:?请先确认A接口}"; export HCCL_SOCKET_IFNAME="$HOST_IF_A" ;;
+  B) : "${HOST_IF_B:?B接口尚未确认，补查询后再启动}"; export HCCL_SOCKET_IFNAME="$HOST_IF_B" ;;
+  *) echo "HOST_ROLE只能为A或B"; exit 1 ;;
+esac
+export GLOO_SOCKET_IFNAME="$HCCL_SOCKET_IFNAME"
 export MODEL_PATH=/ssd_2/models/Qwen3-30B-A3B
-export HCCL_SOCKET_IFNAME=实际控制网络接口
-export GLOO_SOCKET_IFNAME=实际控制网络接口
 export ASCEND_MF_STORE_URL="tcp://${A_IP}:7100"
 export ASCEND_MF_TRANSFER_PROTOCOL=device_rdma
 export SGLANG_CAM_DETOUR_MODE=off
@@ -791,4 +873,4 @@ CAM 初始化一直等待时，检查 A 上 P4与D4是否全启动，B 上 D4与
 - [A2 npu-smi 拓扑查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2npu/npusmi_0072.html) 和 [HCCN 网络健康查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2HCCN/hccntoola2_021.html)
 - 本地UMDK bf74c6db的All-to-All Detour kernel、CamComm和socket exchange实现
 
-开发端已执行配置、分组、窗口容量、分块对齐、归约代数、分析脚本等CPU单元测试，以及修改Python文件的语法检查、shell语法检查和git diff检查。容器采集脚本额外用 mock Docker 验证默认只列清单、停止/暂停状态不进入、显式指定 running 候选才诊断；已检查 README 的 37 段 Bash 命令、脚本内层 Bash 与 Python 的语法。这些检查不代表某个实际 A2 容器已合格。开发容器也未安装PyTorch，因此没有用CPU PyTorch进程组运行适配器。A2编译、CAM实际IPC、设备collective、EP8、PD和Pool命中以及性能测试均待目标环境执行，不能将CPU测试通过写成模型部署已通过。
+开发端已执行配置、分组、窗口容量、分块对齐、归约代数、分析脚本等CPU单元测试，以及修改Python文件的语法检查、shell语法检查和git diff检查。容器采集脚本额外用 mock Docker 验证默认只列清单、停止/暂停状态不进入、显式指定 running 候选才诊断；已检查当前 README 的 41 段 Bash 命令语法，以及脚本内层 Bash 与 Python 的语法。本次用户回传只用于记录已观察到的配置，不是实机兼容性验收。这些检查不代表某个实际 A2 容器已合格。开发容器也未安装PyTorch，因此没有用CPU PyTorch进程组运行适配器。A2编译、CAM实际IPC、设备collective、EP8、PD和Pool命中以及性能测试均待目标环境执行，不能将CPU测试通过写成模型部署已通过。
