@@ -1,0 +1,18 @@
+# Only extend an ALREADY QUALIFIED A2 SGLang image. This Dockerfile deliberately
+# does not choose/install CANN, torch_npu, DeepEP, MemFabric or model weights.
+# See ../README.md: the base image and driver compatibility must be confirmed.
+ARG A2_BASE_IMAGE
+FROM ${A2_BASE_IMAGE}
+
+USER root
+RUN command -v apt-get >/dev/null || \
+    { echo 'This tools layer expects a Debian/Ubuntu base; adapt for another OS.' >&2; exit 1; }
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential cmake git curl ca-certificates pkg-config libssl-dev \
+      unzip zip rsync iproute2 iputils-ping net-tools && \
+    apt-get clean
+
+# Source and runtime data are mounted from the same /ssd_2 path on both hosts.
+WORKDIR /ssd_2/sglang
+CMD ["/bin/bash"]

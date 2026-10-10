@@ -54,39 +54,311 @@ SUM 的数学语义不变，但浮点归约顺序变了，不能要求 BF16 输�
 
 AllReduce 每个 chunk 的原生 AllGather 提供组内进度约束。ReduceScatter 每个 chunk 额外设置组内 barrier，保护 ping pong 复用。它是正确性优先的实验开销，不是 Fabric 优化；hccl-a2a 也保留同样 barrier。多进程独立域的 collective 顺序必须一致，本版不允许自由跨 stream 重排同一组的 CAM 调用。
 
-## 4 第一步准备两机软件和权重
+## 4 部署准备：宿主机、代码、Docker 和权重
 
-在两机记录以下信息，先不要启动实验：
+本节更新于 2026-10-10。两台 **目标 A2 宿主机**的个人目录均为 /ssd_2，容器内也用同一路径。无卡开发服务器 8.146.225.22 的源码仍在 /home/liuyuanwen，不搬家、不下载权重。A_IP、B_IP 是两台 A2 的主机通信 IP，不是开发服务器 IP。
+
+| 内容 | 两台 A2 的统一路径 |
+| --- | --- |
+| SGLang 实验源码 | /ssd_2/sglang |
+| UMDK / CAM 实验源码 | /ssd_2/umdk |
+| 原版 BF16 权重 | /ssd_2/models/Qwen3-30B-A3B |
+| 隔离的下载工具环境 | /ssd_2/qwen3-download-venv |
+| 私有配置、结果、profile | /ssd_2/sglang/experiments/qwen3_cam 下的 runtime-config、results、profiles |
+
+运行数据已通过实验目录 .gitignore 排除，不提交私有地址、权重和采样文件。下文区分宿主机和容器内操作；宿主机中的 export 不会自动进入 docker exec 新终端。
+
+### 4.1 先查询两机信息，不先安装或升级
+
+**A、B 两台 A2 宿主机各执行一次**，分别提供输出；没有工具时保留报错，不为查询改系统配置。
 
 ```bash
+hostname
+uname -m
+cat /etc/os-release
+df -hT /ssd_2
+df -h /dev/shm
 npu-smi info
-python -c 'import torch, torch_npu; print(torch.__version__, torch_npu.__version__); print(torch.npu.device_count())'
-python -m pip show sglang sgl-kernel-npu memfabric-hybrid memcache-hybrid
-git -C /home/liuyuanwen/sglang rev-parse HEAD
-git -C /home/liuyuanwen/umdk rev-parse HEAD
+npu-smi info -t topo
+cat /usr/local/Ascend/driver/version.info
+docker version
+docker info --format 'ServerVersion={{.ServerVersion}} Architecture={{.Architecture}} DockerRootDir={{.DockerRootDir}}'
+docker image ls
+docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
+ip -br link
+ip -br -4 addr
+ip -4 route
+ss -ltn
 ```
 
-核对实际 A2 型号、每卡 HBM、同机 HCCS 或其他互联、跨机 RoCE 和每卡 NIC 的连通性。8 卡不是天然保证 fullmesh。CAM 的 GetShareMemOffset 按物理 rank 寻址，所需 peer IPC 无法访问时必须停止，不要跳过报错继续测。拓扑、驱动和 RoCE 配置由目标 A2 环境确认。
-
-本次源码是 2026 年 10 月拉取的 main 快照，不是官方教程验证过的 v0.5.16。优先使用与此快照匹配的 Ascend SGLang 软件栈；docker/npu.Dockerfile 是依赖核对依据，不要将其中 A3 或 950 的 kernel wheel 直接用于 A2。若现有 A2 只支持较早 CANN，先完成版本适配再继续，不能只 pip install 最新版本混装。当前主线 Dockerfile 使用的 Torch2.10、TorchNPU2.10、MemFabric1.2.1 等仅供对照，不构成这次 A2 已验证兼容性的承诺。
-
-两台目标服务器均保留本地 BF16 权重目录，例如 /models/Qwen3-30B-A3B。如使用 ModelScope CLI，可在目标环境按其已有安装方式下载：
+拉取本实验代码后，可运行新增的完整只读采集脚本：
 
 ```bash
-modelscope download --model Qwen/Qwen3-30B-A3B \
-  --local_dir /models/Qwen3-30B-A3B
+# A2 宿主机，PEER_HOST_IP 填另一台 A2 的主机通信 IP
+export PEER_HOST_IP=另一台A2的主机IP
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_machine_info.sh
 ```
 
-选择的是原版，不与 Instruct2507、量化版或 Qwen3Next 混用。两机权重、tokenizer 和 config 必须一致。BF16 权重约 60GB，仅为磁盘预留参考；部署另需 KV、临时张量、通信窗口和服务内存。不要在无卡开发机下载。
+脚本只查询设备节点、版本、Docker、磁盘、主机接口和每张 NPU 的 IP/link/health；不改网卡、不启动/停止容器，每项查询最多等待 30 秒。若需脱敏地址，请保持两机映射一致。不需要密码、PAT、SSH 私钥或完整环境变量。
+
+| 待用户确认 | 查询/提供方式 | 决定什么 |
+| --- | --- | --- |
+| CPU 架构、OS、Docker 和空间 | 上述输出 | 镜像架构、工具层构建和磁盘预算 |
+| 芯片型号、每卡 HBM、驱动/固件 | npu-smi、driver/firmware version.info | SOC_VERSION、HBM 预算、CANN 兼容性 |
+| 同机拓扑、peer IPC 可达性 | topo；之后 8 rank CAM 冒烟 | 当前物理 rank/绕行实现能否使用 |
+| 已有可用 A2 镜像/容器 | 完整 tag/digest 和容器名 | 固定基础软件栈 |
+| 容器中的 CANN、TorchNPU、DeepEP、kernel、MemFabric/MemCache | 第 4.5 节查询 | 本源码快照是否需要适配 |
+| 两机主机 IP/网卡名、SSH 用户 | ip route get；用户说明 | rendezvous、HTTP、store、传文件 |
+| 各 8 张 NPU 的 IP/link 和交换机环境 | 第 4.2 节；管理员信息 | EP8 和跨机 KV 的设备 RDMA |
+| 其他业务与空闲端口 | ss -ltn；用户说明维护窗口 | 避免占用他人设备和缓存域 |
+
+8 张卡不天然保证 fullmesh；topo 的连接关系不等于每条边有相同可用带宽。CAM 的 GetShareMemOffset 按物理 rank 寻址，peer IPC 不可达必须停止，不能跳过报错。A2 软件栈尚未确认，文档不承诺“一键部署成功”。
+
+### 4.2 如何查主机接口和 NPU 数据网络
+
+主机控制网用于 HCCL/Gloo 建连、torchrun、HTTP 和元数据；NPU 的 RoCE 数据网用于跨机设备搬运，不能用一个 Linux 网卡名混为一谈。
+
+```bash
+# A2 宿主机
+export PEER_HOST_IP=另一台A2的主机IP
+ip -br -4 addr
+ip route get "$PEER_HOST_IP"
+# 输出中 dev 为本机接口名，src 为本机到达对端时使用的 IP
+ip -details link show dev 实际接口名
+ethtool 实际接口名
+ethtool -i 实际接口名
+```
+
+两机网卡名可以不同。后续 HCCL_SOCKET_IFNAME、GLOO_SOCKET_IFNAME 使用各自主机的真实控制网接口，A_IP/B_IP 使用互通的 src 地址。多网口时还需验证各后端建连；一次路由查询不能证明全部通信选对网卡。host network 不会替你配置 NPU 的 IP。
+
+每张卡的设备数据网只用 -g 查询，不使用 -s 修改：
+
+```bash
+# A2 宿主机；实际工具路径如不同先替换
+command -v hccn_tool
+ls -l /usr/local/Ascend/driver/tools/hccn_tool
+export HCCN_QUERY=/usr/local/Ascend/driver/tools/hccn_tool
+for i in {0..7}; do
+  echo "NPU $i"
+  "$HCCN_QUERY" -i "$i" -ip -g
+  "$HCCN_QUERY" -i "$i" -link -g
+  "$HCCN_QUERY" -i "$i" -net_health -g
+done
+```
+
+部分环境工具在 tools/hccn_tool/hccn_tool，完整采集脚本会自动检查。net_health 的 Init 或接收超时可能是未配置对应探测对象，不能单凭它判定网络故障；主机 ping 通不证明全部 NPU RoCE 路径可用。MTU、PFC/ECN、NPU IP 和交换机配置由管理员确认，不盲目改 IP、关防火墙。
+
+端口检查：A 上 7100 为 PD store、8998 为 P bootstrap、29500 为 D rendezvous、30000/30001 为模型 HTTP；B 上 5000/6000/8100 为 Pool metadata/config/metrics；8000 为 Router。10067 为同机 CAM 握手，不要求对外开放。冒烟使用 29610/29611/29612，跨机回放使用 29620。仅向实验私网开放必要访问；后端可能另有动态连接，这不是完整防火墙规则。
+
+### 4.3 拉代码：SGLang 与 UMDK 是两个仓库
+
+**两台 A2 宿主机**执行。先确认 /ssd_2 可写、空间足够；BF16 权重约 60GB，另留镜像、下载缓存、构建和 profile 空间。Docker 存储通常不在 /ssd_2，要检查 DockerRootDir 所在磁盘，不擅自迁移 Docker 数据。
+
+```bash
+mkdir -p /ssd_2/models
+cd /ssd_2
+git clone --branch feat/qwen3-cam-detour-conflict --single-branch \
+  https://github.com/COLDTEA-L/qwen3.git sglang
+git -C /ssd_2/sglang status --short --branch
+git -C /ssd_2/sglang rev-parse HEAD
+```
+
+用户需要先把本次 README 更新从开发服务器 push，第 14 节给命令，否则 GitHub 可能仍是旧文档。两机使用同一 commit。仓库名是 qwen3，但落地目录显式命名 sglang，不需要额外拉 Transformers。
+
+若目录已有源码，不重复 clone、不覆盖脏工作区：
+
+```bash
+cd /ssd_2/sglang
+git status --short --branch
+git remote get-url origin
+# 仅在工作区干净且 origin 是自己的 qwen3 Fork 时继续
+git fetch origin feat/qwen3-cam-detour-conflict
+git switch feat/qwen3-cam-detour-conflict
+git merge --ff-only FETCH_HEAD
+```
+
+UMDK 构建分支不在 qwen3 仓库里，也不能假设已在 GitHub 发布。尚未发布时，用 Git bundle 搬运准确分支，不拿任意 main 代替。
+
+**无卡开发服务器 8.146.225.22 执行**：
+
+```bash
+git -C /home/liuyuanwen/umdk status --short --branch
+git -C /home/liuyuanwen/umdk rev-parse feat/qwen3-cam-detour-build
+# 当前分支应为 9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef
+git -C /home/liuyuanwen/umdk bundle create \
+  /home/liuyuanwen/umdk-qwen3-cam.bundle feat/qwen3-cam-detour-build
+```
+
+**两台 A2 宿主机各执行**；root 是现有开发服务器账号，不表示 A2 也必须用 root，SSH 需按实际权限连接：
+
+```bash
+scp root@8.146.225.22:/home/liuyuanwen/umdk-qwen3-cam.bundle /ssd_2/
+git clone --branch feat/qwen3-cam-detour-build \
+  /ssd_2/umdk-qwen3-cam.bundle /ssd_2/umdk
+git -C /ssd_2/umdk rev-parse HEAD
+git -C /ssd_2/umdk status --short --branch
+```
+
+已有 UMDK 目录时先核对用户修改和历史，再 fetch bundle/fast-forward，不覆盖或删除。bundle 的 origin 是本地文件，不是长期 GitHub remote；以后发布 Fork 再明确替换。bundle 只携带 Git 源码历史，不携带权重或原来未跟踪的 build 文件。
+
+### 4.4 如何建 Docker 和启动容器
+
+先确认 Docker 已安装且当前用户有管理员授予的访问权限。没有 Docker、权限不足或基础镜像未知时，先反馈第 4.1 节信息，再按管理员认可方案安装；本指南不盲目装 Docker、换驱动或授予 docker 组权限。
+
+**兼容性门槛：**当前源码的 docker/npu.Dockerfile 在 MemFabric 安装分支只接受 a3 和 950，直接传 DEVICE_TYPE=910b 会失败。Torch2.10、TorchNPU2.10、MemFabric1.2.1 等仅供核对，不是已验证的 A2 组合；不能将 A3/950 的 kernel wheel 直接用于 A2。
+
+先选择已确认适配本机驱动、A2、所需 SGLang/DeepEP/MemFabric 功能的镜像；完整 tag、digest 和 CANN 版本等查询后固定。已有较早 A2 软件栈可能需要源码/依赖适配，不能混装最新版。新增 docker/Dockerfile.a2-tools 仅为**已合格的 Debian/Ubuntu A2 SGLang 镜像**加构建和查询工具，不安装/升级 CANN、TorchNPU、DeepEP、MemFabric，不拉权重。仅有 CANN 或 Triton 的镜像不等于完整 SGLang 环境。
+
+```bash
+# A2 宿主机，基础镜像待确认后替换
+export A2_BASE_IMAGE=已确认兼容的A2基础镜像完整tag或digest
+# 本地已有可用镜像可跳过 pull，不用未经确认的 latest
+docker pull "$A2_BASE_IMAGE"
+docker image inspect "$A2_BASE_IMAGE" \
+  --format 'Architecture={{.Architecture}} Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}}'
+cd /ssd_2/sglang
+docker build --build-arg A2_BASE_IMAGE="$A2_BASE_IMAGE" \
+  -t qwen3-cam:a2-exp-v1 \
+  -f experiments/qwen3_cam/docker/Dockerfile.a2-tools \
+  experiments/qwen3_cam/docker
+```
+
+同 CPU 架构的两机可保存/复制同一镜像，避免分别构建时依赖漂移；也可分别构建并核对。B_IP、A2_SSH_USER 必须填用户实际地址/账号：
+
+```bash
+# A 宿主机
+docker save qwen3-cam:a2-exp-v1 -o /ssd_2/qwen3-cam-a2-exp-v1.tar
+scp /ssd_2/qwen3-cam-a2-exp-v1.tar "${A2_SSH_USER}@${B_IP}:/ssd_2/"
+# B 宿主机
+docker load -i /ssd_2/qwen3-cam-a2-exp-v1.tar
+```
+
+每机**一个容器承载全部本机角色**；两机可以同名。必须映射全部 8 张卡，不能把 P/D/Pool 容器可见设备切开或重编号。模板不默认 --privileged，设备/peer IPC 权限需要按实际驱动验证；失败先定位，再按获准方案调整，不跳过检查。
+
+```bash
+# A、B 宿主机各执行；设备/驱动使用下面这些路径时才继续
+for node in /dev/davinci{0..7} /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
+  test -c "$node" || { echo "缺少设备节点: $node"; exit 1; }
+done
+for directory in /ssd_2 /usr/local/Ascend/driver /usr/local/Ascend/firmware; do
+  test -d "$directory" || { echo "缺少目录: $directory"; exit 1; }
+done
+NPU_SMI_HOST_PATH=$(command -v npu-smi)
+test -n "$NPU_SMI_HOST_PATH" || { echo "缺少 npu-smi"; exit 1; }
+docker run -d --init --name qwen3-cam-a2 \
+  --network=host --ipc=host \
+  --ulimit memlock=-1:-1 --cap-add IPC_LOCK \
+  --device=/dev/davinci0 --device=/dev/davinci1 \
+  --device=/dev/davinci2 --device=/dev/davinci3 \
+  --device=/dev/davinci4 --device=/dev/davinci5 \
+  --device=/dev/davinci6 --device=/dev/davinci7 \
+  --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
+  --mount type=bind,src=/ssd_2,dst=/ssd_2 \
+  --mount type=bind,src=/usr/local/Ascend/driver,dst=/usr/local/Ascend/driver,readonly \
+  --mount type=bind,src=/usr/local/Ascend/firmware,dst=/usr/local/Ascend/firmware,readonly \
+  --mount "type=bind,src=${NPU_SMI_HOST_PATH},dst=/usr/local/bin/npu-smi,readonly" \
+  --workdir /ssd_2/sglang \
+  qwen3-cam:a2-exp-v1 sleep infinity
+docker exec -it qwen3-cam-a2 bash
+```
+
+同名容器已存在就查询状态，不自动删除/覆盖。若基础镜像有自定义 ENTRYPOINT，先确认它接受 sleep infinity，勿盲目绕过初始化。额外 dcmi、ascend_install.info、hccn.conf 的只读挂载和权限以实际驱动/镜像要求为准，查询后补齐。
+
+不把宿主机 CANN toolkit 挂盖容器 toolkit，以免混用库。--mount 在源不存在时报错；--network=host 直接使用主机端口、不需要 -p；--ipc=host 使用主机 /dev/shm，不能靠 --shm-size 扩大它。请使用专用维护窗口，不随意改变他人的共享内存配置。
+
+### 4.5 容器内确认版本与源码路径
+
+**容器内**查询匹配 CANN 的 set_env.sh，实际不同就替换下面路径。driver 版本不等于 toolkit 版本，需提供实际 toolkit 版本文件内容。
+
+```bash
+find /usr/local/Ascend -maxdepth 4 -name set_env.sh -print
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export MODEL_PATH=/ssd_2/models/Qwen3-30B-A3B
+export PYTHONPATH=/ssd_2/sglang/python${PYTHONPATH:+:$PYTHONPATH}
+cd /ssd_2/sglang
+npu-smi info
+python -c 'import torch, torch_npu; print(torch.__version__, torch_npu.__version__); print("NPU_COUNT", torch.npu.device_count())'
+python -m pip show sglang sglang-router sgl-kernel-npu torch torch-npu \
+  deep-ep deep-ep-npu memfabric-hybrid memcache-hybrid
+python -c 'import importlib.util; print(importlib.util.find_spec("sglang").origin)'
+python experiments/qwen3_cam/test_cpu.py
+find /usr/local/Ascend -maxdepth 4 -type f \
+  \( -name version.cfg -o -name version.info -o -name ascend_toolkit_install.info \) -print
+```
+
+已有容器也可执行上述版本查询，不需要先装本实验。某些包名因安装方式不同而变化，pip show 缺失不是安装最新版的理由。确认 8 卡可见、sglang 来自 /ssd_2/sglang/python、CAM 所需 toolkit 编译器/Python headers 可用；runtime-only 镜像不够。
+
+每次 docker exec 新开终端都重新 source 配套 CANN、export PYTHONPATH/MODEL_PATH 和所需 IP；不会继承另一个交互终端临时 export 的变量。保留已匹配的镜像依赖，不在本步骤 pip install -U sglang/torch/torch_npu 或换 CUDA 包。若原生服务/preflight 不通过，不继续 CAM 性能测量。
+
+### 4.6 下载原版 BF16 权重并校验
+
+仅在有卡的 A2 下载；两机均保留本地完整目录。选 Qwen/Qwen3-30B-A3B，不与 Instruct-2507、量化版或 Qwen3-Next 混用。Pool 卡不加载模型，不代表 D 所在机器可以缺权重。
+
+推荐宿主机独立下载工具环境，避免 ModelScope 改动推理依赖；需要已有 Python3/venv，缺失则先报告，不自行换系统 Python：
+
+```bash
+# A2 宿主机；两机各下载，或 A 下载后同步 B
+python3 -m venv /ssd_2/qwen3-download-venv
+/ssd_2/qwen3-download-venv/bin/python -m pip install modelscope
+/ssd_2/qwen3-download-venv/bin/modelscope download \
+  --model Qwen/Qwen3-30B-A3B \
+  --local_dir /ssd_2/models/Qwen3-30B-A3B
+```
+
+已有可用 CLI 也可直接执行同一 download 命令，不必重装。上方默认原版模型主分支；记录实际 revision，此后不在对照之间更新。最好 A 下载后同步 B，防止两次下载期间主分支变化：
+
+```bash
+# A 宿主机；变量填实际 B 机账号/IP，目标父目录先按第 4.3 节创建
+rsync -a --info=progress2 /ssd_2/models/Qwen3-30B-A3B/ \
+  "${A2_SSH_USER}@${B_IP}:/ssd_2/models/Qwen3-30B-A3B/"
+```
+
+不使用 --delete、不混入已有的另一模型目录；目标已存在时先核对模型身份和文件列表。两机**容器内**只读验证配置和分片存在性，不加载 30B 权重：
+
+```bash
+export MODEL_PATH=/ssd_2/models/Qwen3-30B-A3B
+python - <<'PY'
+import json, os
+from pathlib import Path
+root = Path(os.environ["MODEL_PATH"])
+config = json.loads((root / "config.json").read_text())
+print({k: config.get(k) for k in (
+    "model_type", "num_hidden_layers", "num_experts", "num_experts_per_tok",
+    "num_key_value_heads", "head_dim", "torch_dtype", "dtype")})
+assert config["model_type"] == "qwen3_moe"
+assert config["num_hidden_layers"] == 48
+assert config["num_experts"] == 128 and config["num_experts_per_tok"] == 8
+index = json.loads((root / "model.safetensors.index.json").read_text())
+files = sorted(set(index["weight_map"].values()))
+assert all((root / name).is_file() for name in files), "缺少权重分片"
+assert (root / "tokenizer.json").is_file()
+print("MODEL_FILES_PASS", len(files))
+PY
+```
+
+再做两机内容校验；大文件校验占用磁盘带宽，在采样之前完成：
+
+```bash
+# A 宿主机，清单放在模型目录外
+cd /ssd_2/models/Qwen3-30B-A3B
+find . -type f \( -name '*.json' -o -name '*.safetensors' -o -name '*.jinja' \) \
+  -print0 | sort -z | xargs -0 sha256sum > /ssd_2/Qwen3-30B-A3B.sha256
+scp /ssd_2/Qwen3-30B-A3B.sha256 "${A2_SSH_USER}@${B_IP}:/ssd_2/"
+# B 宿主机
+cd /ssd_2/models/Qwen3-30B-A3B
+sha256sum -c /ssd_2/Qwen3-30B-A3B.sha256
+```
+
+全部 OK 后再部署。约 60GB 只是权重磁盘量，不是单卡 HBM 需求；模型分片、KV、临时张量、CAM 窗口、Pool 均需独立 HBM 预算。
 
 ## 5 第二步安装实验分支和 CAM
 
-在目标两机拉取你的 SGLang Fork，切到实验分支。若已经有完整源码，先检查工作区，不要覆盖其他修改。
+完成第 4 节后在两机实验容器内构建。本节及后续 torchrun/服务命令均在容器内执行（宿主机查询和客户端压测另有说明）。不要误装到宿主机或覆盖用户工作区。
 
 ```bash
-cd /home/liuyuanwen/sglang
+cd /ssd_2/sglang
 git switch feat/qwen3-cam-detour-conflict
-export PYTHONPATH=/home/liuyuanwen/sglang/python${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=/ssd_2/sglang/python${PYTHONPATH:+:$PYTHONPATH}
 python experiments/qwen3_cam/test_cpu.py
 ```
 
@@ -95,16 +367,16 @@ python experiments/qwen3_cam/test_cpu.py
 UMDK 的构建分支保留原 All-to-All Detour 实现，仅增加独立构建目录和 CXX ABI 匹配的脚本。在专用实验容器中执行，CANN 环境路径以实际安装为准：
 
 ```bash
-cd /home/liuyuanwen/umdk
+cd /ssd_2/umdk
 git switch feat/qwen3-cam-detour-build
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_PYTHON_EXECUTABLE=$(command -v python)
-export SOC_VERSION=ascend910b4
-# 上一行只是示例 必须替换为 npu-smi 确认的真实 SoC
+export SOC_VERSION=待确认的真实A2SoC
+# 例如 ascend910b1 或 ascend910b4；须按实际硬件/CANN确认，不能直接猜测
 bash build/cam/comm_operator/build_qwen3_all2all_detour.sh "$SOC_VERSION"
 ls output/cam/qwen3-all2all/wheel
 # 用上一行显示的确切 wheel 文件名安装 不使用其他分支留下的 wheel
-python -m pip install --no-deps /确切路径/umdk_cam_op_lib版本.whl
+python -m pip install --no-deps /ssd_2/umdk/output/cam/qwen3-all2all/wheel/确切wheel文件名.whl
 ```
 
 脚本会在该容器中安装生成的 CAM 自定义算子包，可能更新既有 CAM vendor 包，因此必须使用独立实验环境并保留原镜像或安装包。它不删除原来的 src/cam/comm_operator/build。编译参数与当前 PyTorch 的 CXX ABI 匹配。两机分别构建或使用完全匹配的同一架构 wheel，不能跨 CANN、TorchNPU 或 CPU 架构复用。
@@ -114,7 +386,7 @@ python -m pip install --no-deps /确切路径/umdk_cam_op_lib版本.whl
 这一步占用整机 8 张卡，不同时运行模型或 Pool。两台机器分别执行。停止仅限自己启动的实验进程，不使用 pkill python 一类广泛命令。
 
 ```bash
-cd /home/liuyuanwen/sglang
+cd /ssd_2/sglang
 export PYTHONPATH=$PWD/python${PYTHONPATH:+:$PYTHONPATH}
 unset CAM_COMM_ID
 export SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=0
@@ -135,13 +407,13 @@ torchrun --nproc_per_node=8 --master_port=29611 \
 ```bash
 export A_IP=机器A的IP
 export B_IP=机器B的IP
-export MODEL_PATH=/models/Qwen3-30B-A3B
+export MODEL_PATH=/ssd_2/models/Qwen3-30B-A3B
 export HCCL_SOCKET_IFNAME=实际控制网络接口
 export GLOO_SOCKET_IFNAME=实际控制网络接口
 export ASCEND_MF_STORE_URL="tcp://${A_IP}:7100"
 export ASCEND_MF_TRANSFER_PROTOCOL=device_rdma
 export SGLANG_CAM_DETOUR_MODE=off
-cd /home/liuyuanwen/sglang
+cd /ssd_2/sglang
 ```
 
 Ascend PD 使用 MemFabric TransferEngine，在源和目标注册 KV 缓冲，store URL 在所有 worker 中一致。7100 为 PD 传输的独立协调端口；它不是后面的 MemCache 6000。检查端口未被占用并允许互通。已安装 MemFabric 必须支持 DEVICE_RDMA，否则 preflight 应失败，不接受自动回退 SDMA 后继续测跨机 RDMA。
@@ -239,13 +511,13 @@ bash experiments/qwen3_cam/launch.sh p-a \
 在角色对应的两机终端进行 preflight，然后设定模式。D 的两机必须同一模式，P 也采用一致模式，配置文件仍按角色区分。
 
 ```bash
-export PYTHONPATH=/home/liuyuanwen/sglang/python${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=/ssd_2/sglang/python${PYTHONPATH:+:$PYTHONPATH}
 python experiments/qwen3_cam/preflight.py \
   --config experiments/qwen3_cam/configs/p_a.json \
   --model-path "$MODEL_PATH" --mode cam-detour
 export SGLANG_CAM_DETOUR_MODE=cam-detour
 export SGLANG_CAM_TRACE_MOE=1
-export SGLANG_CAM_DETOUR_TRACE='/home/liuyuanwen/sglang/experiments/qwen3_cam/results/p-a-{rank}.jsonl'
+export SGLANG_CAM_DETOUR_TRACE='/ssd_2/sglang/experiments/qwen3_cam/results/p-a-{rank}.jsonl'
 ```
 
 其他角色使用 d_a.json 和 d_b.json；trace 文件名改成 d-a 或 d-b，以免 P 和 D 的逻辑 rank 同号覆盖。将正确输出目录设为 SGLANG_TORCH_PROFILER_DIR。trace JSONL 记录的是 host 提交时间，不能据此计算设备实际重叠。
@@ -318,10 +590,10 @@ python experiments/qwen3_cam/serving_workload.py \
 ```bash
 curl -X POST "http://${A_IP}:30000/start_profile" \
   -H 'Content-Type: application/json' \
-  -d '{"output_dir":"/home/liuyuanwen/sglang/experiments/qwen3_cam/profiles/p","start_step":3,"num_steps":30,"activities":["CPU","GPU"]}'
+  -d '{"output_dir":"/ssd_2/sglang/experiments/qwen3_cam/profiles/p","start_step":3,"num_steps":30,"activities":["CPU","GPU"]}'
 curl -X POST "http://${A_IP}:30001/start_profile" \
   -H 'Content-Type: application/json' \
-  -d '{"output_dir":"/home/liuyuanwen/sglang/experiments/qwen3_cam/profiles/d","start_step":3,"num_steps":30,"activities":["CPU","GPU"]}'
+  -d '{"output_dir":"/ssd_2/sglang/experiments/qwen3_cam/profiles/d","start_step":3,"num_steps":30,"activities":["CPU","GPU"]}'
 ```
 
 发送 workload 后检查所有 worker 的实际 trace。关注 CAM_DETOUR、NATIVE_MOE、HCCL task 和 KV transfer。CPU record_function 范围只是关联入口；真正的重叠从 device task 的开始结束时间计算。不同机器时钟要同步，跨机器不要直接拼接未校准的 timestamp。若普通 profiler 看不到 RDMA 或 SDMA 任务，使用目标 CANN 所支持的系统 interconnect 采集或 MemFabric completed transfer 指标补充，不能把缺失事件当成没有流量。
@@ -381,32 +653,37 @@ python experiments/qwen3_cam/analyze_replay.py \
 
 最终每条结论至少附拓扑和实际路径、device timeline、独立与并发数值、重复轮次和实现版本。允许三种结果：有链路冲突、有 HBM或DMA竞争但无同链路冲突、在当前负载下未发现冲突。开发环境无卡，当前文档不填写任何假想的实测百分比。
 
-## 14 GitHub 建仓和推送
+## 14 更新分支与 GitHub 推送
 
-不需要单独建立名为 Qwen3 的模型源码仓库。改动在 SGLang 中，推荐 Fork https://github.com/sgl-project/sglang 到你的账号，Fork 可命名为 qwen3-cam-serving。Fork 自带上游历史，适合当前 shallow clone；不要向一个空仓库直接推浅历史。
+用户仓库是 https://github.com/COLDTEA-L/qwen3，代码为 SGLang Fork，不需要再建立独立模型源码仓。README 和配套工具随实验分支提交；权重/私有配置不推送。
 
-在 GitHub 页面点击 Fork 和 Create fork 后，在开发服务器执行。YOUR_GITHUB_USER 需要替换为你的实际用户名。该终端已在 root 下操作不影响归属，GitHub 身份由认证决定，使用 PAT 或 SSH，不用账号密码。
+**无卡开发服务器 8.146.225.22** 上执行；这里仍是 /home/liuyuanwen，不是 A2 的 /ssd_2：
 
 ```bash
 cd /home/liuyuanwen/sglang
 git status --short --branch
 git switch feat/qwen3-cam-detour-conflict
-git remote add publish https://github.com/YOUR_GITHUB_USER/qwen3-cam-serving.git
-git push -u publish feat/qwen3-cam-detour-conflict
+git remote get-url publish
+# 核对是 https://github.com/COLDTEA-L/qwen3.git，再 push
+env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=1 \
+  git -c core.askPass= -c credential.helper= \
+  push -u publish feat/qwen3-cam-detour-conflict
 ```
 
-如 publish 已存在，先 git remote get-url publish 核对，勿再次添加。保留 origin 指向原 SGLang 上游，本任务不替你发布到 GitHub。目标 A2 主机从该 Fork clone 并切分支即可，不上传权重、profile、运行日志或私有地址配置。
+该命令绕过先前失效的 VS Code askpass。若要求认证，用户名 COLDTEA-L，密码位置输入具有本仓库写权限的 PAT，不是账号密码；PAT 不写入命令、URL 或 README，也不发给协作者。已有可用 SSH/凭据管理器也可按既有流程认证。本次只更新本地/开发服务器分支，不代用户发布 GitHub。
 
-UMDK 配套构建改动在独立分支。可将服务器上的 UMDK 仓库推到你已有的 UMDK Fork：
+UMDK 的构建分支是另一个仓库，尚未发布时按第 4.3 节用 bundle 即可。以后若发布到真实存在的 UMDK Fork，先核对 remote 和历史，不使用虚构的 URL：
 
 ```bash
+# 无卡开发服务器；UMDK_FORK_URL 由用户提供
 cd /home/liuyuanwen/umdk
+git status --short --branch
 git switch feat/qwen3-cam-detour-build
-git remote add publish https://github.com/YOUR_GITHUB_USER/你的UMDK仓库.git
+export UMDK_FORK_URL=你的真实UMDKFork地址
+# 仅当 publish 不存在时添加，已有则先核对 git remote get-url publish
+git remote add publish "$UMDK_FORK_URL"
 git push -u publish feat/qwen3-cam-detour-build
 ```
-
-若没有 UMDK Fork 而想新建空仓库，应先从该仓库真实 origin 拉齐历史，或按现有 UMDK 发布流程建立 Fork，再推送。无需为两个构建改动上传模型权重。运行配置 runtime-config 已忽略，给 A2 用户单独提供真实地址即可。
 
 ## 15 失败定位和回滚
 
@@ -428,6 +705,10 @@ CAM 初始化一直等待时，检查 A 上 P4与D4是否全启动，B 上 D4与
 - https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/mem_cache/storage/npu_memcache/README.md
 - https://github.com/sgl-project/sglang/blob/f620d73/docs/docs/hardware-platforms/ascend-npus/optimization/profiling.mdx
 - https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json
+- [Docker host network](https://docs.docker.com/engine/network/drivers/host/) 和 [容器运行参数](https://docs.docker.com/reference/cli/docker/container/run/)
+- [Ascend PyTorch 版本与安装说明](https://github.com/Ascend/pytorch)
+- [ModelScope 官方下载说明](https://github.com/modelscope/ms-cookbook/blob/main/content/chapters/chapter-02.md)
+- [A2 npu-smi 拓扑查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2npu/npusmi_0072.html) 和 [HCCN 网络健康查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2HCCN/hccntoola2_021.html)
 - 本地UMDK bf74c6db的All-to-All Detour kernel、CamComm和socket exchange实现
 
 开发端已执行配置、分组、窗口容量、分块对齐、归约代数、分析脚本等CPU单元测试，以及修改Python文件的语法检查、shell语法检查和git diff检查。开发容器也未安装PyTorch，因此没有用CPU PyTorch进程组运行适配器。A2编译、CAM实际IPC、设备collective、EP8、PD和Pool命中以及性能测试均待目标环境执行，不能将CPU测试通过写成模型部署已通过。
