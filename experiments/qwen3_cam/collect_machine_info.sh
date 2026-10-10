@@ -31,6 +31,7 @@ query Docker-client-server docker version
 query Docker-storage docker info --format 'ServerVersion={{.ServerVersion}} Architecture={{.Architecture}} StorageDriver={{.Driver}} DockerRootDir={{.DockerRootDir}}'
 query Docker-images docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}'
 query Running-containers docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
+query All-containers docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'
 query NPU-tool-path bash -c 'command -v npu-smi'
 query NPU-status npu-smi info
 query NPU-identifiers npu-smi info -l

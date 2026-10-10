@@ -85,6 +85,7 @@ docker version
 docker info --format 'ServerVersion={{.ServerVersion}} Architecture={{.Architecture}} DockerRootDir={{.DockerRootDir}}'
 docker image ls
 docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
+docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'
 ip -br link
 ip -br -4 addr
 ip -4 route
@@ -131,19 +132,27 @@ ethtool -i 实际接口名
 
 两机网卡名可以不同。后续 HCCL_SOCKET_IFNAME、GLOO_SOCKET_IFNAME 使用各自主机的真实控制网接口，A_IP/B_IP 使用互通的 src 地址。多网口时还需验证各后端建连；一次路由查询不能证明全部通信选对网卡。host network 不会替你配置 NPU 的 IP。
 
-每张卡的设备数据网只用 -g 查询，不使用 -s 修改：
+每张卡的设备数据网只用 -g 查询，不使用 -s 修改；以下自动尝试常见工具位置：
 
 ```bash
-# A2 宿主机；实际工具路径如不同先替换
-command -v hccn_tool
-ls -l /usr/local/Ascend/driver/tools/hccn_tool
-export HCCN_QUERY=/usr/local/Ascend/driver/tools/hccn_tool
-for i in {0..7}; do
-  echo "NPU $i"
-  "$HCCN_QUERY" -i "$i" -ip -g
-  "$HCCN_QUERY" -i "$i" -link -g
-  "$HCCN_QUERY" -i "$i" -net_health -g
-done
+# A2 宿主机
+HCCN_QUERY=$(command -v hccn_tool)
+if [ -z "$HCCN_QUERY" ]; then
+  HCCN_QUERY=/usr/local/Ascend/driver/tools/hccn_tool
+fi
+if [ ! -x "$HCCN_QUERY" ]; then
+  HCCN_QUERY=/usr/local/Ascend/driver/tools/hccn_tool/hccn_tool
+fi
+if [ -x "$HCCN_QUERY" ]; then
+  for i in {0..7}; do
+    echo "NPU $i"
+    "$HCCN_QUERY" -i "$i" -ip -g
+    "$HCCN_QUERY" -i "$i" -link -g
+    "$HCCN_QUERY" -i "$i" -net_health -g
+  done
+else
+  echo "未找到 hccn_tool，请提供实际安装路径"
+fi
 ```
 
 部分环境工具在 tools/hccn_tool/hccn_tool，完整采集脚本会自动检查。net_health 的 Init 或接收超时可能是未配置对应探测对象，不能单凭它判定网络故障；主机 ping 通不证明全部 NPU RoCE 路径可用。MTU、PFC/ECN、NPU IP 和交换机配置由管理员确认，不盲目改 IP、关防火墙。
@@ -286,9 +295,79 @@ find /usr/local/Ascend -maxdepth 4 -type f \
   \( -name version.cfg -o -name version.info -o -name ascend_toolkit_install.info \) -print
 ```
 
-已有容器也可执行上述版本查询，不需要先装本实验。某些包名因安装方式不同而变化，pip show 缺失不是安装最新版的理由。确认 8 卡可见、sglang 来自 /ssd_2/sglang/python、CAM 所需 toolkit 编译器/Python headers 可用；runtime-only 镜像不够。
+以上用于已经按第 4.4 节准备的新实验容器。未知是否可用的已有容器按第 4.5.1 节查询，不预先切换源码或安装实验。某些包名因安装方式不同而变化，pip show 缺失不是安装最新版的理由。新实验容器要确认 8 卡可见、sglang 来自 /ssd_2/sglang/python、CAM 所需 toolkit 编译器/Python headers 可用；runtime-only 镜像不够。
 
 每次 docker exec 新开终端都重新 source 配套 CANN、export PYTHONPATH/MODEL_PATH 和所需 IP；不会继承另一个交互终端临时 export 的变量。保留已匹配的镜像依赖，不在本步骤 pip install -U sglang/torch/torch_npu 或换 CUDA 包。若原生服务/preflight 不通过，不继续 CAM 性能测量。
+
+#### 4.5.1 不知道哪个已有容器可用时，如何筛选
+
+镜像是创建容器的模板，容器可写层可能额外装过包；“容器能用”不等于“原镜像能复现”。名字含 ascend/sglang、状态 Up、npu-smi 正常，都只是候选线索，不是本实验兼容性证据。
+
+**第一步：两台 A2 宿主机各列清单。** 不需要启动任何容器或先拉实验代码：
+
+```bash
+hostname
+docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+docker image ls --digests
+```
+
+优先选自己或获准查询的、已运行的 Ascend/PyTorch/SGLang 容器。不批量进入全部容器，不确定归属先把清单发回来，由用户/管理员确认候选。镜像名中的 910b/A2 可作为线索，A3/950 或 CUDA-only 镜像不能据此当作 A2 环境。
+
+**第二步：查选定候选的配置。** 只输出指定字段，不打印完整 inspect 或 Env，以免泄露凭据：
+
+```bash
+export CANDIDATE=你的已获准查询的容器名
+docker container inspect "$CANDIDATE" \
+  --format 'Name={{.Name}} ImageTag={{.Config.Image}} ImageID={{.Image}} State={{.State.Status}} Network={{.HostConfig.NetworkMode}} IPC={{.HostConfig.IpcMode}} Runtime={{.HostConfig.Runtime}} Privileged={{.HostConfig.Privileged}}'
+docker container inspect "$CANDIDATE" --format '{{json .HostConfig.Devices}}'
+docker container inspect "$CANDIDATE" --format '{{json .HostConfig.DeviceRequests}}'
+docker container inspect "$CANDIDATE" \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination "RW=" .RW}}{{end}}'
+```
+
+记录映射的 NPU、driver/firmware 来源、/ssd_2 挂载和网络/IPC 模式。使用 Ascend runtime/OCI hook 时 Devices 可能为空，要结合容器内可见性，不能只凭字段判定没卡。缺 /ssd_2 或 host network/shared IPC，可能只是部署配置需改，不等于镜像软件不合格；在独立实验容器里改，不动现有业务容器。
+
+**停止、暂停或重启中的容器到此为止。** 不直接 docker start：原启动命令可能恢复模型服务、抢卡或占端口。只记录 ImageID；若要验证该镜像，先确认维护窗口，再按第 4.4 节建立独立容器。
+
+**第三步：只对已获准的 running 候选查询内部环境。** 不安装包、不加载模型、不创建通信域或测试张量。工具缺失则保留报错：
+
+```bash
+# A2 宿主机，仅对已确认 running 的候选执行
+docker exec "$CANDIDATE" bash -c \
+  'uname -m; cat /etc/os-release; command -v python; command -v python3; find /usr/local/Ascend -maxdepth 4 -name set_env.sh -print'
+docker exec "$CANDIDATE" bash -c \
+  'npu-smi info; ls -l /dev/davinci{0..7} /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc'
+```
+
+拉取实验代码后，推荐用新增的脚本，输出 CANN/包版本、模块导入结果和可见卡数。通过宿主机标准输入传入探测内容，候选容器**无需挂载 /ssd_2 或安装脚本**：
+
+```bash
+# 默认只列清单，不进入任何容器
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh
+# 选定一个获准候选后
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh "$CANDIDATE"
+# 若需要加载 CANN，先从上一步查询中选择匹配镜像的可信路径
+bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh \
+  "$CANDIDATE" /usr/local/Ascend/ascend-toolkit/set_env.sh
+```
+
+第二个参数是容器内真实路径，默认路径并非保证存在；先核对它与镜像库匹配，不盲目 source。脚本不批量探测，不启动/停止/重启容器，不升级包，不打印完整环境变量，不提交镜像。每项 30 秒超时；超时表示未确认，不是兼容性否决。导入库可能有少量初始化开销，忙碌业务容器先经所有者同意。
+
+若使用专用 conda/venv，默认 docker exec 的 PATH 可能不是原服务使用的 Python。提供激活方法或实际解释器路径后重新查询；不要把“默认 python 没 Torch”等同“容器没 Torch”。脚本只初筛，不自动宣告哪个容器最佳。
+
+| 结果 | 如何理解/下一步 |
+| --- | --- |
+| 架构和驱动/CANN/TorchNPU 组合明确；TorchNPU 可导入，NPU_AVAILABLE=True，NPU_COUNT=8 | 基础候选，仍需核对目标 A2 和版本兼容性 |
+| npu-smi 正常但 TorchNPU 缺失/导入失败 | 可能只有驱动工具，或 Python 环境没激活；保留错误，不盲装最新版 |
+| 只见 4 卡或设备访问失败 | 核对设备映射、可见设备设置和权限；其镜像仍可能可复用到新 8 卡容器 |
+| sgl_kernel_npu/deep_ep 缺失或不兼容 | 当前 MoE 依赖未满足或后端需要适配；包名存在也不证明支持 A2 EP8 |
+| DEVICE_RDMA_API=False 或 MemCache API 缺失 | 当前接口不匹配/未确认，不能直接进入跨机 KV/Pool；保留实际版本 |
+| toolkit 编译器/Python headers 不可用 | 可能能运行但不能编译 CAM；工具层不会替你安装 CANN |
+| 所有基础查询通过 | 仍只是候选，需第 5—8 节的 CAM 正确性、原生 EP8/PD 和 Pool 读写验证 |
+
+还没安装 umdk_cam_op_lib 很正常，由第 5 节构建，不因此排除候选。已有容器的 SGLang 路径也不必是 /ssd_2，仅新实验容器要求指向实验分支。选定后在干净新容器复核，避免依赖旧容器可写层改动；不擅自 docker commit 现有容器。
+
+请回传 A/B 的宿主机信息、全部镜像/容器清单、每台 1—2 个获准候选的配置和脚本输出，以及 Python 环境激活方法。不发密码/Token。根据这些信息再固定基础镜像、依赖、挂载和网卡，不直接对未知容器运行模型。
 
 ### 4.6 下载原版 BF16 权重并校验
 
@@ -706,9 +785,10 @@ CAM 初始化一直等待时，检查 A 上 P4与D4是否全启动，B 上 D4与
 - https://github.com/sgl-project/sglang/blob/f620d73/docs/docs/hardware-platforms/ascend-npus/optimization/profiling.mdx
 - https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json
 - [Docker host network](https://docs.docker.com/engine/network/drivers/host/) 和 [容器运行参数](https://docs.docker.com/reference/cli/docker/container/run/)
+- [Docker 容器清单](https://docs.docker.com/reference/cli/docker/container/ls/)、[指定字段检查](https://docs.docker.com/reference/cli/docker/container/inspect/) 和 [running 容器内诊断](https://docs.docker.com/reference/cli/docker/container/exec/)
 - [Ascend PyTorch 版本与安装说明](https://github.com/Ascend/pytorch)
 - [ModelScope 官方下载说明](https://github.com/modelscope/ms-cookbook/blob/main/content/chapters/chapter-02.md)
 - [A2 npu-smi 拓扑查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2npu/npusmi_0072.html) 和 [HCCN 网络健康查询](https://www.hiascend.com/doc_center/source/zh/HDK/2610/A2/A2HCCN/hccntoola2_021.html)
 - 本地UMDK bf74c6db的All-to-All Detour kernel、CamComm和socket exchange实现
 
-开发端已执行配置、分组、窗口容量、分块对齐、归约代数、分析脚本等CPU单元测试，以及修改Python文件的语法检查、shell语法检查和git diff检查。开发容器也未安装PyTorch，因此没有用CPU PyTorch进程组运行适配器。A2编译、CAM实际IPC、设备collective、EP8、PD和Pool命中以及性能测试均待目标环境执行，不能将CPU测试通过写成模型部署已通过。
+开发端已执行配置、分组、窗口容量、分块对齐、归约代数、分析脚本等CPU单元测试，以及修改Python文件的语法检查、shell语法检查和git diff检查。容器采集脚本额外用 mock Docker 验证默认只列清单、停止/暂停状态不进入、显式指定 running 候选才诊断；已检查 README 的 37 段 Bash 命令、脚本内层 Bash 与 Python 的语法。这些检查不代表某个实际 A2 容器已合格。开发容器也未安装PyTorch，因此没有用CPU PyTorch进程组运行适配器。A2编译、CAM实际IPC、设备collective、EP8、PD和Pool命中以及性能测试均待目标环境执行，不能将CPU测试通过写成模型部署已通过。
