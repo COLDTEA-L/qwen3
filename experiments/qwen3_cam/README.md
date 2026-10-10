@@ -79,7 +79,8 @@ AllReduce 每个 chunk 的原生 AllGather 提供组内进度约束。ReduceScat
 | 控制网接口 | 两机 enp67s0f5，此前用于跨机 OpenSora | 沿用 HCCL/Gloo 接口；建连测试时再验证，不重复全量网络盘点 |
 | B 的个人 SGLang 容器 | yuanwen_sglang_a2，镜像标注 cann9.0.0-910b-v0.5.16 | 优先查版本；以其原始镜像为候选，新建实验镜像和容器 |
 | A 的旧 SGLang 容器 | 标签 v0.5.13.post1，与 B 不同 | 不再要求进入他人的 A 容器；最终两机复制同一合格实验镜像 |
-| 芯片、HBM、CPU 架构、驱动和可用空间 | 尚未补齐 | 只回传 4.0.1 的简短查询 |
+| 芯片与每卡 HBM | 两机均 Ascend 910B4、每卡 32GB，用户确认 | 不再重复询问型号/标称容量；编译按本仓库 ascend910b4 参数准备 |
+| CPU 架构、驱动和可用空间 | 尚未补齐 | 只回传 4.0.1 的简短查询 |
 | 当前代码与候选栈兼容性 | 仍待确认 | 只回传 B 的 4.0.2；合格后在新容器复核 |
 | 16 卡使用窗口 | 未确认 | 用户确认何时能独占两机各 8 卡；新容器隔离软件，不隔离 HCCS/HBM/NPU |
 | 跨机 EP8、PD/Pool RDMA | 历史 OpenSora 不构成本版本的功能验收 | 启动前做第 5—8 节测试，失败再定向查询 HCCN/交换机，不盲改网络 |
@@ -101,7 +102,7 @@ df -h /dev/shm
 docker info --format 'Architecture={{.Architecture}} DockerRootDir={{.DockerRootDir}}'
 ```
 
-npu-smi 用于核对实际芯片、HBM 和当前设备占用；空闲的一次快照不代替用户/管理员确认实验窗口。Docker 镜像通常存放在 DockerRootDir，还需在**构建/导入前**检查其所在磁盘空间，无需发送全部磁盘清单。
+npu-smi 此时用于检查设备健康、当前 HBM/进程占用，不再要求用户重新确认 910B4/32GB。Docker 镜像通常存放在 DockerRootDir，还需在**构建/导入前**检查其所在磁盘空间，无需发送全部磁盘清单。
 
 不用再发完整 ss 输出；仅在实际启动前检查实验选用的端口，见第 4.2 节。
 
@@ -143,6 +144,12 @@ fi
 | 7 | 切 cam-detour、做 hccl-a2a 对照及冲突回放（9—13） | 真实 CAM_CALL、相同输入/软件/负载；验证时间重叠、资源共享和增量影响 |
 
 先不做第 5—7 步的性能承诺。需要设备独占的测试要等维护窗口；拉代码、下载权重可以提前完成。
+
+**“16 卡可用实验窗口”不是额外硬件参数**，而是确认实验期间两台机器的卡 0—7 没有其他训练/推理任务，并且不会临时加入其他任务。P/D/Pool 共占满 16 卡，CAM 绕行还会访问同机其余卡，因此不能只确认自己的模型卡空闲。
+
+确认方法：与机器负责人/调度系统约定起止时间，明确两机各 8 卡可供本实验使用；开始前在两机运行 npu-smi info，核对没有无关计算进程、利用率回落、HBM 没有旧模型常驻。驱动/系统基础占用不必为零；有未知进程或大额 HBM 占用时先问归属，不杀进程。容器显示 Up 不等于正在占卡，也不等于卡空闲。监控快照只能证明当时情况，后续无其他任务需要预约/管理约定保证。可直接回复：“两机各 8 卡在某时段可独占，没有其他任务”；无需提供审批截图。
+
+**32GB HBM 的部署预算：**Qwen3-30B-A3B BF16 约 60GB 的完整权重须常驻所有专家，不能按每 token 只激活约 3B 参数来估算容量。P4 平均权重约 15GB/卡只是粗估，实际还有复制权重、KV、激活、通信缓冲与默认 512MiB CAM 窗口；D8 的 Attention DP2 也包含复制内容，不能简单把所有内存除以 8。Pool 卡的初始 8GB 缓存另加 CAM/运行时开销。P4+D8+Pool4 暂不因此改布局，但要先小 batch、短上下文验证实际峰值，再逐步增加；launch.sh 的请求上限/上下文上限不是可同时占满的内存承诺，OOM 时保留日志并下调后统一重跑对照。
 
 ### 4.1 可选扩展诊断：出现问题再查，不是当前必做清单
 
@@ -577,8 +584,8 @@ cd /ssd_2/umdk
 git switch feat/qwen3-cam-detour-build
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_PYTHON_EXECUTABLE=$(command -v python)
-export SOC_VERSION=待确认的真实A2SoC
-# 例如 ascend910b1 或 ascend910b4；须按实际硬件/CANN确认，不能直接猜测
+export SOC_VERSION=ascend910b4
+# 用户已确认910B4；这是当前UMDK脚本的参数形式，仍须匹配实际CANN编译工具
 bash build/cam/comm_operator/build_qwen3_all2all_detour.sh "$SOC_VERSION"
 ls output/cam/qwen3-all2all/wheel
 # 用上一行显示的确切 wheel 文件名安装 不使用其他分支留下的 wheel
