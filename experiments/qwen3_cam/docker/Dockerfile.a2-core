@@ -1,0 +1,13 @@
+# Source dependencies are resolved only in this new image, never in the old service.
+ARG A2_BASE_IMAGE=qwen3-cam:a2-base-observed
+FROM ${A2_BASE_IMAGE}
+USER root
+RUN command -v apt-get && python -c 'import sys,platform; assert sys.version_info[:2] == (3,11); assert platform.machine() == "aarch64"'
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential cmake git curl ca-certificates pkg-config libssl-dev unzip zip rsync iproute2 iputils-ping && apt-get clean
+COPY constraints-core.txt source-pyproject_npu.toml /opt/qwen3-cam/
+RUN python -c 'import tomllib; from pathlib import Path; p=Path("/opt/qwen3-cam"); d=tomllib.loads((p/"source-pyproject_npu.toml").read_text()); (p/"source-requirements.txt").write_text("\n".join(d["project"]["dependencies"] + ["sglang-router==0.3.2", "pybind11", "wheel==0.45.1"]) + "\n")'
+RUN python -m pip install --no-cache-dir --constraint /opt/qwen3-cam/constraints-core.txt --requirement /opt/qwen3-cam/source-requirements.txt
+RUN python -c 'import importlib.metadata as m,sysconfig; from pathlib import Path; expected={"torch":"2.10.0+cpu","torch-npu":"2.10.0","sgl-kernel-npu":"2026.6.1","deep-ep":"1.0.0+48942e37.cann.9.0.0.b250","memfabric-hybrid":"1.0.8","transformers":"5.19.0"}; assert all(m.version(k)==v for k,v in expected.items()),expected; assert (Path(sysconfig.get_path("include"))/"Python.h").is_file(),"Need headers for this exact Python3.11, not Ubuntu Python3.10"'
+RUN python -m pip freeze > /opt/qwen3-cam/core-freeze.txt
+WORKDIR /ssd_2/sglang
+CMD ["/bin/bash"]

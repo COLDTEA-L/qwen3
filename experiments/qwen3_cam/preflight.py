@@ -13,6 +13,8 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--model-path")
     parser.add_argument("--mode", choices=["off", "hccl-a2a", "cam-detour"], default="cam-detour")
+    parser.add_argument("--require-pool", action="store_true")
+    parser.add_argument("--import-model", action="store_true", help="Import model code without loading weights")
     args = parser.parse_args()
     from sglang.srt.distributed.device_communicators.cam_detour import CamConfig
     config = CamConfig.from_dict(json.loads(Path(args.config).read_text()))
@@ -35,6 +37,29 @@ def main():
         except Exception as exc:
             failed.append("umdk_cam_op_lib")
             print("CAM_IMPORT_FAILED", str(exc))
+    if args.import_model:
+        try:
+            model = importlib.import_module("sglang.srt.models.qwen3_moe")
+            print("MODEL_IMPORT_OK", model.__file__)
+        except Exception as exc:
+            failed.append("model_import")
+            print("MODEL_IMPORT_FAILED", type(exc).__name__, str(exc))
+    if args.require_pool:
+        try:
+            from memcache_hybrid import DistributedObjectStore, LocalConfig, MetaConfig, MetaService
+            cfg = LocalConfig()
+            for name in ("world_size", "protocol", "dram_size", "hbm_size", "max_hbm_size",
+                         "meta_service_url", "config_store_url"):
+                if not hasattr(cfg, name):
+                    raise RuntimeError(f"Missing LocalConfig field {name}")
+            for name in ("setup", "init", "register_buffer", "batch_put_from", "batch_get_into"):
+                if not hasattr(DistributedObjectStore, name):
+                    raise RuntimeError(f"Missing MemCache API {name}")
+            print("POOL_API_OK", importlib.metadata.version("memcache-hybrid"),
+                  importlib.metadata.version("memfabric-hybrid"))
+        except Exception as exc:
+            failed.append("memcache_hybrid")
+            print("POOL_API_FAILED", type(exc).__name__, str(exc))
     try:
         import torch
         if not torch.npu.is_available() or torch.npu.device_count() != 8:
@@ -63,6 +88,11 @@ def main():
         print("WEIGHT_SHARDS", len(shards))
         if not shards:
             failed.append("weights")
+        index = Path(args.model_path) / "model.safetensors.index.json"
+        if index.is_file():
+            names = set(json.loads(index.read_text())["weight_map"].values())
+            if any(not (Path(args.model_path) / name).is_file() for name in names):
+                failed.append("missing_weight_shard")
     print("VISIBLE_DEVICES", os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "not reindexed"))
     if failed:
         raise SystemExit("PREFLIGHT_FAILED " + ",".join(failed))

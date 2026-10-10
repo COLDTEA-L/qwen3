@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,9 +18,33 @@ spec2.loader.exec_module(analysis)
 spec3 = importlib.util.spec_from_file_location("serving_workload", Path(__file__).with_name("serving_workload.py"))
 workload = importlib.util.module_from_spec(spec3)
 spec3.loader.exec_module(workload)
+spec4 = importlib.util.spec_from_file_location("runtime_config", Path(__file__).with_name("configure_runtime.py"))
+runtime_config = importlib.util.module_from_spec(spec4)
+spec4.loader.exec_module(runtime_config)
 
 
 class CamTests(unittest.TestCase):
+    def test_runtime_config(self):
+        result = runtime_config.render("192.0.2.1", "192.0.2.2", "testuser")
+        pool, client = (json.loads(result[name]) for name in ("pool.json", "client.json"))
+        self.assertEqual(pool["hbm_size"], "8GB")
+        self.assertEqual(client["hbm_size"], 0)
+        self.assertEqual(client["dram_size"], 0)
+        self.assertEqual(client["meta_service_url"], "tcp://192.0.2.2:5000")
+        with self.assertRaises(ValueError):
+            runtime_config.render("192.0.2.1", "192.0.2.1", "testuser")
+
+    def test_runtime_write_guard(self):
+        configs = runtime_config.render("192.0.2.1", "192.0.2.2", "testuser")
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_config.write_configs(directory, configs)
+            path = Path(directory) / "client.json"
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            original = path.read_text()
+            with self.assertRaises(FileExistsError):
+                runtime_config.write_configs(directory, configs)
+            self.assertEqual(path.read_text(), original)
+
     def test_role_mappings(self):
         for filename, ranks, expected in (
             ("p_a", range(4), (0, 1, 2, 3)),

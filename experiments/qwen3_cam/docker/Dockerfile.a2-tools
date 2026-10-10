@@ -1,3 +1,5 @@
+# Legacy optional tools-only recipe; the current step-by-step runbook uses
+# Dockerfile.a2-core / Dockerfile.a2-pool instead.
 # Only extend an ALREADY QUALIFIED A2 SGLang image. This Dockerfile deliberately
 # does not choose/install CANN, torch_npu, DeepEP, MemFabric or model weights.
 # See ../README.md: the base image and driver compatibility must be confirmed.

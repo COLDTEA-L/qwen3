@@ -1,0 +1,9 @@
+# Protect the observed A2 binary stack while resolving source Python dependencies.
+torch==2.10.0+cpu
+torch-npu==2.10.0
+sgl-kernel-npu==2026.6.1
+deep-ep==1.0.0+48942e37.cann.9.0.0.b250
+memfabric-hybrid==1.0.8
+transformers==5.19.0
+sglang-router==0.3.2
+wheel==0.45.1

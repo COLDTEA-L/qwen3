@@ -4,3 +4,4 @@ results/
 profiles/
 runtime-config/
 *.log
+docker/source-pyproject_npu.toml
