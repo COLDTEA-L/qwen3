@@ -56,7 +56,7 @@ AllReduce 每个 chunk 的原生 AllGather 提供组内进度约束。ReduceScat
 
 ## 4 部署准备：宿主机、代码、Docker 和权重
 
-本节更新于 2026-10-10。**DeepEP/DEVICE_RDMA接口已确认；MemCache缺失，B的Docker磁盘99%满，先处理4.0.2b的部署门槛；代码和权重可先准备。**两台 **目标 A2 宿主机**的个人目录均为 /ssd_2，容器内也用同一路径。无卡开发服务器 8.146.225.22 的源码仍在 /home/liuyuanwen，不搬家、不下载权重。A_IP、B_IP 是两台 A2 的主机通信 IP，不是开发服务器 IP。
+本节更新于 2026-10-10。**容器Ubuntu22.04/Python3.11.15与原始ImageID已确认；B镜像盘现剩166GB，可推进原始镜像无卡依赖核对与小增量方案。MemCache及设备验收仍待完成。**两台 **目标 A2 宿主机**的个人目录均为 /ssd_2，容器内也用同一路径。无卡开发服务器 8.146.225.22 的源码仍在 /home/liuyuanwen，不搬家、不下载权重。A_IP、B_IP 是两台 A2 的主机通信 IP，不是开发服务器 IP。
 
 | 内容 | 两台 A2 的统一路径 |
 | --- | --- |
@@ -81,7 +81,7 @@ AllReduce 每个 chunk 的原生 AllGather 提供组内进度约束。ReduceScat
 | A 的旧 SGLang 容器 | 标签 v0.5.13.post1，与 B 不同 | 不再要求进入他人的 A 容器；最终两机复制同一合格实验镜像 |
 | 芯片与每卡 HBM | 两机均 Ascend 910B4、每卡 32GB，用户确认 | 不再重复询问型号/标称容量；编译按本仓库 ascend910b4 参数准备 |
 | CPU 架构、宿主 OS、驱动 | 两机 aarch64、EulerOS 2.0 SP10、driver 25.5.2，设备健康均 OK | 基础信息已齐，不重复询问；CANN组合仍须实机验证 |
-| 空间与共享内存 | /ssd_2：A可用855G，B可用2.1T；Docker所在/ssd_1：A剩617G（91%），B剩72G（99%） | 权重/源码放/ssd_2；B暂停新镜像构建/导入，先由管理员处理磁盘余量 |
+| 空间与共享内存 | /ssd_2：A可用855G，B可用2.1T；Docker所在/ssd_1：A此前剩617G，B清理后最新剩166GB | 可推进复用现有镜像的小增量准备；不拉另一套完整栈，构建时监控余量 |
 | 当前代码与候选栈兼容性 | CANN9.0.0、Torch/TorchNPU2.10.0；DeepEP Buffer/Config与MemFabric DEVICE_RDMA存在；MemCache模块缺失 | API初筛通过但未验证传输；真实Pool还需固定版本依赖与新容器验收 |
 | 16 卡使用窗口 | 两机每张卡均已有Python进程，不是空闲状态 | A每卡HBM约4GB、B约13.2GB；AICore=0不等于可用，先确认旧任务归属/退出时段 |
 | 跨机 EP8、PD/Pool RDMA | 历史 OpenSora 不构成本版本的功能验收 | 启动前做第 5—8 节测试，失败再定向查询 HCCN/交换机，不盲改网络 |
@@ -142,35 +142,41 @@ fi
 | deep_ep | 1.0.0+48942e37.cann.9.0.0.b250；Buffer=True、Config=True | 模块与关键入口已确认；跨机EP8功能/性能尚未实测 |
 | memfabric_hybrid | 1.0.8；TransferEngine=True、DEVICE_RDMA_API=True | 所需枚举存在，不必因版本号低就升级；不等于RDMA初始化/设备网络测试通过 |
 | memcache_hybrid | ModuleNotFoundError | 当前查询的Python环境确实不可导入；不能启动真实MemCache Pool |
-| Python路径 | /usr/local/python3.11.15/lib/python3.11/site-packages | 模块位于Python3.11环境；固定wheel前再核对实际解释器版本/ABI |
+| 容器OS / Python | Ubuntu22.04.5 LTS / Python3.11.15 | 工具层apt-get方案适用当前容器系统；使用cp311/aarch64依赖，原始镜像还需复核 |
 
 Torch CPU wheel + TorchNPU安装方式见 [PyTorch官方Ascend平台说明](https://pytorch.org/get-started/additional-platforms/)。DeepEP和MemFabric的接口查询已经完成，不再要求重复提供该段输出。
 
-容器OS/确切ImageID本次尚未回传；下面两行在**B宿主机、候选仍running时**补齐即可，用于选择工具层和固定原始镜像，不加载模型：
+原始镜像已固定（不是RepoDigest，是用户回传的本地ImageID）：
+
+- 标签：quay.io/ascend/sglang:cann9.0.0-910b-v0.5.16
+- ImageID：sha256:39c97f336132e02b9e7066428ddde439e763623e4024c1f405049f79b5be4ad6
+
+**下一步：B宿主机执行以下一整行**，无需shell换行、无需拉实验仓库。只从已有原始镜像新建临时无卡容器读取包元数据；不映射设备/宿主目录、不加载模型、不安装包、不开网络。命令结束后--rm只移除本次临时容器，不动原业务容器/镜像。指定标准runc以免继承设备注入运行时；若本机不允许runc或python不在PATH，回传错误，不换成privileged/映射NPU绕过。
 
 ```bash
-docker inspect yuanwen_sglang_a2 --format 'Image={{.Config.Image}} ImageID={{.Image}} State={{.State.Status}}'
-docker exec yuanwen_sglang_a2 bash -c 'cat /etc/os-release; python --version'
+docker run --rm --network=none --runtime=runc --entrypoint python sha256:39c97f336132e02b9e7066428ddde439e763623e4024c1f405049f79b5be4ad6 -m pip show sglang torch torch-npu sgl-kernel-npu deep-ep memfabric-hybrid memcache-hybrid transformers | awk '/^(Name|Version):/ {print}'
 ```
+
+请回传这个简短结果；missing警告也保留。不要求原始镜像版本与旧容器完全相同；差异应记录并在新镜像中按明确版本补齐，而不是修改旧容器。元数据检查通过不证明二进制ABI/API或实际模型通过，后续仍做源码import、CAM、EP8、PD和Pool验证。
 
 MemCache是独立的缓存服务库，MemFabric是传输底座；已有MemFabric不自动包含MemCache。[项目发布说明](https://pypi.org/project/memcache-hybrid/)说明两者有依赖关系，但不能把两者版本号机械设成相同，更不能据此虚构memcache-hybrid==1.0.8安装命令。
 
 真实Pool依赖只能在**新实验镜像**中补齐：选择明确匹配CANN9.0、Python3.11/aarch64、glibc与本实验DistributedObjectStore/LocalConfig/MetaService/MetaConfig API的版本，固定wheel来源与哈希；检查它对MemFabric的依赖，避免自动覆盖已确认的1.0.8。当前尚未完成这组兼容性验收，不无条件pip install -U，也不往yuanwen_sglang_a2安装。若必须升级配套栈，在独立镜像中重跑PD、Pool、EP8等全部基线。
 
-原始镜像是否含候选可写层中同样的依赖仍需干净复核；宿主EulerOS不代表容器也是EulerOS。工具层Dockerfile用apt-get，必须确认容器基础OS为Debian/Ubuntu，不能直接用于RPM环境。
+原始镜像是否含候选可写层中同样的依赖仍需干净复核。已确认候选容器为Ubuntu22.04，宿主为EulerOS，两者并不冲突；工具层apt-get方案有系统依据，其自身仍检查apt-get是否存在。
 
-#### 4.0.2b 当前部署门槛：B镜像磁盘、Pool依赖、设备窗口
+#### 4.0.2b 当前推进顺序：镜像复核、Pool依赖、设备窗口
 
 | 项目 | 当前证据 | 下一步 |
 | --- | --- | --- |
 | A的Docker盘 | /ssd_1剩617G，使用率91% | 可作为优先构建候选，仍预算镜像解包、构建缓存和其他业务增长 |
-| B的Docker盘 | /ssd_1剩72G，使用率99% | 暂停本方案的新pull/build/load/大规模包安装；不能只看镜像tar大小认定安全 |
+| B的Docker盘 | 用户清理后最新剩166GB；已不按旧72G状态阻断 | 可开始无卡核对；明确依赖后小增量构建并监控空间，不承诺完整栈重建足够 |
 | B的/ssd_2 | 剩2.1T | 代码、权重、wheel与镜像tar可以放这里；不自动改变Docker层/容器可写层的存储位置 |
 | MemCache | 模块不可导入 | 新实验镜像补配套依赖；不是在原业务容器里安装 |
 | 设备 | 上次两机每卡都有Python进程 | 所有者确认旧任务正常退出/预约16卡后再做设备测试 |
 | 基础镜像复现 | 标签与当前容器包版本不同 | 固定原始ImageID，干净容器复核；不临时commit原业务容器 |
 
-磁盘处理需要用户/管理员选择：释放**已明确归属且可清理**的数据，或提供有足够余量的隔离实验Docker存储环境。容量应覆盖本次新增层、解包/构建临时空间、容器可写层/日志及业务增长；没有一个由“72G”即可推导出的通用安全阈值。A剩余617G也不是无限空间。
+用户已清理并回传B剩166GB，当前不要求继续删除。限定复用已在本地的固定基础镜像，只增加工具/已确认依赖层；权重、源码、下载包和镜像tar放/ssd_2。容量仍需覆盖新增层、构建临时空间、可写层/日志和其他业务增长，不把166GB当作任意重建/升级整个栈的保证。A此前剩617G也需在导入前复查。
 
 不执行docker system prune/image prune/builder prune，不删除未知镜像/容器/卷，不迁移/重启正在服务的共享Docker daemon。修改全局data-root会影响所有用户，不属于本实验默认授权；另起隔离daemon也需要管理员确认socket、数据目录及NPU/runtime配置，不能自行启动。相关存储配置见 [Docker官方说明](https://docs.docker.com/engine/daemon/)。
 
@@ -181,7 +187,7 @@ docker system df
 df -h /ssd_1/docker /ssd_2
 ```
 
-目前可以继续4.3/4.6准备代码和权重，不要执行4.4镜像构建/导入，也不要启动模型/Pool。磁盘方案确定后再选择“B构建复制A”或“A构建复制B”；统一同一镜像/依赖的原则不变，不能因为B空间不足就直接混用A的旧版本栈。若获准在A构建，可将B原始镜像的save文件放B的/ssd_2后传A，但它不携带原容器可写层依赖，需同样复核。最终回传B仍需要确认Docker存储余量。
+现在可执行4.0.2a的无卡镜像元数据核对，并继续4.3/4.6准备代码和权重。基础镜像依赖差异明确后才执行4.4的小增量构建，按“B构建复制A”统一实验栈。MemCache配套依赖尚未确定，工具层不会自动安装它，不能仅建完Docker就直接启动Pool。模型/CAM/EP8设备测试仍等16卡窗口；不因建容器而停止他人任务。
 
 缺MemCache时，可在兼容环境/空闲设备上单独验收CAM或做第12节代理流量回放；该回放不能替代原生KV Pool服务实验。
 
@@ -191,8 +197,8 @@ df -h /ssd_1/docker /ssd_2
 | --- | --- | --- |
 | 1 | 两机拉 SGLang；开发端导出 UMDK bundle 后复制（4.3） | 目录可写、网络可达即可；不依赖 NPU 或端口 |
 | 2 | 一机下载原版 BF16 权重，复制另一机并校验（4.6） | 空间足够即可；下载工具独立于推理环境 |
-| 3 | 硬件/API/磁盘已回传；处理4.0.2b门槛 | B磁盘方案、MemCache固定依赖、容器OS/ImageID与16卡窗口 |
-| 4 | 磁盘方案确定后构建同一实验镜像，再各建独立容器（4.4—4.5） | 当前B暂停构建/导入；空间/基础栈明确后按选定构建方向执行 |
+| 3 | 已知基础信息齐全；做4.0.2a无卡镜像核对 | 原始镜像与旧容器依赖差异、MemCache固定依赖、16卡窗口 |
+| 4 | B小增量构建同一实验镜像并复制A，再各建独立容器（4.4—4.5） | 原始镜像复核、明确匹配依赖后执行；166GB预算仍需监控 |
 | 5 | 原生依赖预检、CAM 编译/8 卡正确性（5—6） | 新环境 import/API 通过；每机 8 个物理 rank 的 CAM 可达且结果正确 |
 | 6 | 原生 off 的 P4 + D8 + Pool4（7—8） | 模型输出、EP8、PD 迁移和 Pool 读写验证；不是只看启动日志 |
 | 7 | 切 cam-detour、做 hccl-a2a 对照及冲突回放（9—13） | 真实 CAM_CALL、相同输入/软件/负载；验证时间重叠、资源共享和增量影响 |
@@ -207,7 +213,7 @@ df -h /ssd_1/docker /ssd_2
 
 ### 4.1 可选扩展诊断：出现问题再查，不是当前必做清单
 
-硬件/API/磁盘回传已记录，现在只补容器OS/ImageID，并处理4.0.2b的磁盘、Pool依赖和设备窗口。后续发现驱动/挂载/网络异常时再按对应问题补查；已知拓扑、接口和镜像清单不重复收集，不发送密码、PAT、SSH 私钥或完整环境变量。
+硬件、候选API、容器OS/ImageID和166GB空间均已记录；下一步是4.0.2a的原始镜像无卡核对、Pool依赖与设备窗口。后续发现驱动/挂载/网络异常时再按对应问题补查；已知拓扑、接口和镜像清单不重复收集，不发送密码、PAT、SSH 私钥或完整环境变量。
 
 代码已拉取后可用以下脚本做完整诊断；它会输出较多信息，因此现在不要求执行或复制全部输出：
 
@@ -361,7 +367,7 @@ git -C /ssd_2/umdk status --short --branch
 
 ### 4.4 如何建 Docker 和启动容器
 
-**当前暂停：B的Docker盘99%满。**下面保留原“B构建、复制A”的条件性模板，现在不执行；先按4.0.2b确定安全存储方案，再决定构建主机/传输方向。不因模板存在就视为已获准迁移Docker、清理他人数据或安装MemCache。
+**先复核再构建：**B最新剩166GB，可按“复用本地基础镜像、小增量工具层”的方案准备。先执行4.0.2a无卡包核对，确认基础栈/依赖差异后使用下面模板；不修改原容器、不迁移Docker、不清理他人数据。MemCache仍需独立固定版本与验收，不能把工具层当成完整已合格环境。
 
 先确认 Docker 已安装且当前用户有管理员授予的访问权限。没有 Docker、权限不足或基础镜像未知时，先反馈第 4.1 节信息，再按管理员认可方案安装；本指南不盲目装 Docker、换驱动或授予 docker 组权限。
 
@@ -377,7 +383,8 @@ git -C /ssd_2/umdk status --short --branch
 
 ```bash
 # B 宿主机：固定个人容器实际使用的原始镜像，避免标签漂移
-export A2_SOURCE_IMAGE_ID=$(docker inspect yuanwen_sglang_a2 --format '{{.Image}}')
+export A2_SOURCE_IMAGE_ID=sha256:39c97f336132e02b9e7066428ddde439e763623e4024c1f405049f79b5be4ad6
+# 已固定用户确认的原始镜像，不再随旧容器/标签变化漂移
 test -n "$A2_SOURCE_IMAGE_ID" || { echo "未找到原始镜像"; exit 1; }
 docker image inspect "$A2_SOURCE_IMAGE_ID" \
   --format 'ID={{.Id}} Architecture={{.Architecture}} Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}}' \
@@ -557,7 +564,7 @@ bash /ssd_2/sglang/experiments/qwen3_cam/collect_container_info.sh \
 
 还没安装 umdk_cam_op_lib 很正常，由第 5 节构建，不因此排除候选。已有容器的 SGLang 路径也不必是 /ssd_2，仅新实验容器要求指向实验分支。选定后在干净新容器复核，避免依赖旧容器可写层改动；不擅自 docker commit 现有容器。
 
-本次已有清单、版本、接口与磁盘信息，不再重复提交；只补第4.0.2a的容器OS/ImageID，处理4.0.2b门槛。只有原候选不可用时，才重新筛选一个获准候选并提供其配置/激活方式。不发密码/Token。根据这些信息再固定基础镜像、依赖、挂载和网卡，不直接对未知容器运行模型。
+本次已有清单、版本、接口、OS/ImageID与空间信息，不再重复提交；按4.0.2a复核原始镜像的包元数据，推进4.0.2b依赖与设备验收。只有原候选不可用时，才重新筛选一个获准候选并提供其配置/激活方式。不发密码/Token。根据这些信息再固定基础镜像、依赖、挂载和网卡，不直接对未知容器运行模型。
 
 ### 4.6 下载原版 BF16 权重并校验
 
