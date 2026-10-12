@@ -149,7 +149,7 @@ python3 experiments/qwen3_cam/configure_runtime.py
 
 本节在**238宿主机**执行，不是在旧容器里执行。已确认238使用legacy builder，不支持此前命令中的BuildKit日志参数；现改用每条命令的DOCKER_BUILDKIT=0，不安装buildx、不修改Docker全局配置。DEPRECATED提示只是警告，真正的构建错误要单独处理。[Docker旧构建器说明](https://docs.docker.com/reference/cli/docker/image/build/)。
 
-镜像标签不等于已经存在的镜像：先构建core，再构建pool；docker save只导出，docker run才创建容器。此前两条命令在参数解析阶段失败，Dockerfile尚未执行。**不要一次性复制本节全部命令；每一步成功后才执行下一步。**
+镜像标签不等于已经存在的镜像：先构建core，再构建pool；docker save只导出，docker run才创建容器。最新回传中core已进入Dockerfile，基础镜像、Python3.11与aarch64检查通过，失败在Ubuntu软件源访问；core/pool尚未成功生成。**不要一次性复制本节全部命令；每一步成功后才执行下一步。**
 
 不修改旧yuanwen_sglang_a2、不使用opensora:latest。以下标签若已存在，先核对；已是本实验合格镜像可跳过构建，否则用新标签并同步修改后续引用，不覆盖他人标签。
 
@@ -163,10 +163,37 @@ cd /ssd_2/yuanwenliu/sglang
 cp python/pyproject_npu.toml experiments/qwen3_cam/docker/source-pyproject_npu.toml
 ```
 
+**构建前必做：在238宿主机设置代理并测试。**以下采用HTTP/HTTPS CONNECT代理，真实地址由你输入，不提供虚构地址。代理必须在有卡环境可达，不能填不互通的无卡开发服务器；127.0.0.1指238本机，不是你的电脑。仅SOCKS5代理请先使用代理程序的HTTP/mixed端口，不要只设置ALL_PROXY。
+
+先**单独执行下面这一行**，按提示输入完整代理URL并回车，再复制后面的命令。输入不回显，避免含认证信息的URL进入shell历史；不要把代理账号/密码发到聊天或提交到仓库：
+
+```bash
+read -r -s -p '238可用的HTTP代理URL（含协议和端口）: ' QWEN_BUILD_PROXY; printf '\n'
+```
+
+然后在**同一个238宿主机终端**导出大小写环境变量，兼容apt和pip；NO_PROXY保留已有设置，否则只排除本机地址：
+
+```bash
+export HTTP_PROXY="${QWEN_BUILD_PROXY:?请先输入代理URL}" HTTPS_PROXY="$QWEN_BUILD_PROXY" http_proxy="$QWEN_BUILD_PROXY" https_proxy="$QWEN_BUILD_PROXY"
+export NO_PROXY="${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,::1}}"
+export no_proxy="$NO_PROXY"
+unset QWEN_BUILD_PROXY
+```
+
+用基础镜像检查与构建相同的host网络和代理传递方式，不占NPU、不安装包。两个地址都应返回200，否则先处理代理，不继续构建：
+
+```bash
+docker run --rm --network=host --runtime=runc -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY -e http_proxy -e https_proxy -e no_proxy --entrypoint python qwen3-cam:a2-base-observed -c 'import urllib.request; urls=("http://ports.ubuntu.com/ubuntu-ports/dists/jammy/InRelease","https://pypi.org/simple/transformers/"); [print(url,urllib.request.urlopen(url,timeout=20).status) for url in urls]'
+```
+
+--network=host让构建容器能连接238本机代理；它与后面推理容器的设备配置无关。构建时用--build-arg传HTTP_PROXY/HTTPS_PROXY/NO_PROXY及小写变量，**只写变量名，不在命令中展开含密码的URL**。这些是Docker预定义代理参数，无需在Dockerfile添加ARG/ENV；本次不把代理永久写入镜像，也不修改Docker daemon全局代理。[Docker代理构建参数说明](https://docs.docker.com/build/building/variables/#proxy-arguments)。
+
+新开宿主机终端要重新设置代理，不能只传一次给旧容器。Ubuntu源、PyPI以及pool wheel所在的files.pythonhosted.org都须经代理可达；403/407通常需要检查访问策略/认证，证书错误按组织CA处理，不关闭TLS校验。
+
 **第二步：只构建core。**这里不会启动模型：
 
 ```bash
-DOCKER_BUILDKIT=0 docker build -f experiments/qwen3_cam/docker/Dockerfile.a2-core -t qwen3-cam:a2-core-v1 experiments/qwen3_cam/docker
+DOCKER_BUILDKIT=0 docker build --network=host --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy -f experiments/qwen3_cam/docker/Dockerfile.a2-core -t qwen3-cam:a2-core-v1 experiments/qwen3_cam/docker
 ```
 
 必须看到Successfully tagged qwen3-cam:a2-core-v1，且下面的检查成功，才能进入第三步：
@@ -178,7 +205,7 @@ docker image inspect qwen3-cam:a2-core-v1 --format '{{.Id}} {{.Architecture}}'
 **第三步：构建pool。**命令先确认core存在；缺失时不执行构建：
 
 ```bash
-docker image inspect qwen3-cam:a2-core-v1 >/dev/null && DOCKER_BUILDKIT=0 docker build -f experiments/qwen3_cam/docker/Dockerfile.a2-pool --build-arg A2_CORE_IMAGE=qwen3-cam:a2-core-v1 -t qwen3-cam:a2-pool-v1 experiments/qwen3_cam/docker
+docker image inspect qwen3-cam:a2-core-v1 >/dev/null && DOCKER_BUILDKIT=0 docker build --network=host --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY --build-arg http_proxy --build-arg https_proxy --build-arg no_proxy -f experiments/qwen3_cam/docker/Dockerfile.a2-pool --build-arg A2_CORE_IMAGE=qwen3-cam:a2-core-v1 -t qwen3-cam:a2-pool-v1 experiments/qwen3_cam/docker
 ```
 
 必须看到Successfully tagged qwen3-cam:a2-pool-v1，并检查成功：
@@ -258,7 +285,13 @@ source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228
 
 ### 4.5 238下载权重，复制给228
 
-进入238新容器，使用Python3.11独立下载环境；不加载模型：
+构建代理不会自动成为运行期环境变量。先回到**238宿主机**，确认当前终端仍有第4.3节的代理设置；新终端先重新设置。仅对本次下载终端传代理，不重新创建容器、不传给后续普通推理终端：
+
+```bash
+docker exec -it -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY -e http_proxy -e https_proxy -e no_proxy qwen3-cam-a2-v3 /bin/bash
+```
+
+进入后使用Python3.11独立下载环境；不加载模型，不source开启offline模式的env.sh。代理同时供pip安装ModelScope和下载权重使用：
 
 ```bash
 unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
@@ -270,7 +303,7 @@ mkdir -p /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/results
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -c 'import json; from pathlib import Path; p=Path("/ssd_2/yuanwenliu/models/Qwen3-30B-A3B"); c=json.loads((p/"config.json").read_text()); expected={"model_type":"qwen3_moe","num_hidden_layers":48,"num_experts":128,"num_experts_per_tok":8,"num_key_value_heads":4,"head_dim":128}; assert all(c.get(k)==v for k,v in expected.items()),c; i=json.loads((p/"model.safetensors.index.json").read_text()); shards=set(i["weight_map"].values()); assert all((p/n).is_file() and (p/n).stat().st_size>0 for n in shards); print("MODEL_FILES_PASS",len(shards))'
 ```
 
-约60GB BF16权重，不选AWQ/GPTQ/FP8。已有完整权重可跳过下载但保留校验。exit返回238宿主机：
+约60GB BF16权重，不选AWQ/GPTQ/FP8。已有完整权重可跳过下载但保留校验。下载结束exit返回238宿主机；这个exec会话的代理变量随会话结束。之后推理按第4.4节普通docker exec进入，228/238业务连接仍须直连，不经公网下载代理：
 
 ```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/runtime-config/deployment.env
@@ -566,6 +599,8 @@ origin应为https://gitcode.com/yuanwenliu/umdk.git。使用GitCode账户及对�
 | 问题 | 先查 |
 | --- | --- |
 | ascend runtime缺失、挂载路径缺失 | docker info与宿主路径；请管理员处理，不改Docker全局配置、不切旧opensora镜像 |
+| apt超时，随后找不到zip/rsync等包 | 先修复源索引访问；按4.3传构建代理与host网络，不通过删除包名绕过问题 |
+| pip或wheel下载失败 | 构建代理是否传入；PyPI/files.pythonhosted.org访问策略、认证及CA；不关闭TLS校验 |
 | 源码导入失败 | 是否用/ssd_2/yuanwenliu/sglang/python、CANN环境、新源码要求的kernel API |
 | EP/PD/Pool网络失败 | 当前后端DEVICE_RDMA、接口/端口与各NPU网络健康 |
 | CAM等待 | 全部8 owner、10067、comm_id7、物理rank映射/IPC权限 |
@@ -588,4 +623,4 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 - [SGLang Qwen3](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/models/qwen3_moe.py)、[PD](https://github.com/sgl-project/sglang/blob/f620d73/docs/docs/advanced_features/pd_disaggregation.mdx)、[NPU MemCache](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/mem_cache/storage/npu_memcache/README.md)及本仓库NPU pyproject。
 - [MemCache API版本说明](https://raw.githubusercontent.com/Ascend/memcache/master/doc/install_whl.md)、[1.1.0包元数据](https://pypi.org/pypi/memcache-hybrid/1.1.0/json)、[MemFabric1.1.0元数据](https://pypi.org/pypi/memfabric-hybrid/1.1.0/json)；wheel和SHA256见docker/requirements-pool.txt。
 
-本次通过14项CPU测试、46段Bash命令及Python/shell语法检查；文档检查包含legacy构建命令及镜像存在性前置条件。测试覆盖个人路径、228/238启动角色、ascend/八卡/IPC参数及挂载范围；这些不等于目标实机验收。本次未在228/238实际创建容器，也未构建或运行A2模型。
+本次通过14项CPU测试、50段Bash命令及Python/shell语法检查；文档检查包含legacy构建、两次构建的六个代理参数、host网络、下载会话代理与镜像存在性前置条件。测试覆盖个人路径、228/238启动角色、ascend/八卡/IPC参数及挂载范围；这些不等于目标实机验收。未实际验证238的代理可达性，本次未在228/238创建容器，也未构建或运行A2模型。
