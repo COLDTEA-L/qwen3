@@ -147,7 +147,13 @@ python3 experiments/qwen3_cam/configure_runtime.py
 
 ### 4.3 238构建镜像
 
+本节在**238宿主机**执行，不是在旧容器里执行。已确认238使用legacy builder，不支持此前命令中的BuildKit日志参数；现改用每条命令的DOCKER_BUILDKIT=0，不安装buildx、不修改Docker全局配置。DEPRECATED提示只是警告，真正的构建错误要单独处理。[Docker旧构建器说明](https://docs.docker.com/reference/cli/docker/image/build/)。
+
+镜像标签不等于已经存在的镜像：先构建core，再构建pool；docker save只导出，docker run才创建容器。此前两条命令在参数解析阶段失败，Dockerfile尚未执行。**不要一次性复制本节全部命令；每一步成功后才执行下一步。**
+
 不修改旧yuanwen_sglang_a2、不使用opensora:latest。以下标签若已存在，先核对；已是本实验合格镜像可跳过构建，否则用新标签并同步修改后续引用，不覆盖他人标签。
+
+**第一步：检查空间、基础镜像并准备构建文件。**任一步报错就停止：
 
 ```bash
 df -h /ssd_1/docker /ssd_2/yuanwenliu
@@ -155,27 +161,53 @@ docker image inspect sha256:39c97f336132e02b9e7066428ddde439e763623e4024c1f40504
 docker tag sha256:39c97f336132e02b9e7066428ddde439e763623e4024c1f405049f79b5be4ad6 qwen3-cam:a2-base-observed
 cd /ssd_2/yuanwenliu/sglang
 cp python/pyproject_npu.toml experiments/qwen3_cam/docker/source-pyproject_npu.toml
-docker build --progress=plain -f experiments/qwen3_cam/docker/Dockerfile.a2-core -t qwen3-cam:a2-core-v1 experiments/qwen3_cam/docker
-docker build --progress=plain -f experiments/qwen3_cam/docker/Dockerfile.a2-pool --build-arg A2_CORE_IMAGE=qwen3-cam:a2-core-v1 -t qwen3-cam:a2-pool-v1 experiments/qwen3_cam/docker
+```
+
+**第二步：只构建core。**这里不会启动模型：
+
+```bash
+DOCKER_BUILDKIT=0 docker build -f experiments/qwen3_cam/docker/Dockerfile.a2-core -t qwen3-cam:a2-core-v1 experiments/qwen3_cam/docker
+```
+
+必须看到Successfully tagged qwen3-cam:a2-core-v1，且下面的检查成功，才能进入第三步：
+
+```bash
+docker image inspect qwen3-cam:a2-core-v1 --format '{{.Id}} {{.Architecture}}'
+```
+
+**第三步：构建pool。**命令先确认core存在；缺失时不执行构建：
+
+```bash
+docker image inspect qwen3-cam:a2-core-v1 >/dev/null && DOCKER_BUILDKIT=0 docker build -f experiments/qwen3_cam/docker/Dockerfile.a2-pool --build-arg A2_CORE_IMAGE=qwen3-cam:a2-core-v1 -t qwen3-cam:a2-pool-v1 experiments/qwen3_cam/docker
+```
+
+必须看到Successfully tagged qwen3-cam:a2-pool-v1，并检查成功：
+
+```bash
+docker image inspect qwen3-cam:a2-pool-v1 --format '{{.Id}} {{.Architecture}}'
 ```
 
 core安装编译工具、源码NPU依赖、Router0.3.2；pool固定安装MemCache/MemFabric1.1.0。要求当前Python3.11的Python.h。依赖解算或headers失败，保留错误，不解除Torch/kernel约束或换A3/950 wheel。
 
-238此前Docker盘剩166GB，构建前以实际df为准；不要docker system prune或删除他人镜像。验证最终包版本：
+**第四步：验证pool包版本。**238回传的磁盘快照为Docker盘剩166G、个人目录所在盘剩2.1T；每次构建前以实际df为准，不代表所有后续构建都保证空间够用。不要docker system prune或删除他人镜像。
 
 ```bash
 docker run --rm --network=none --runtime=runc --entrypoint python qwen3-cam:a2-pool-v1 -m pip show torch torch-npu sgl-kernel-npu deep-ep memfabric-hybrid memcache-hybrid transformers | awk '/^(Name|Version):/ {print}'
 ```
 
-预期见第2节；此条无NPU查询用runc。后面的模型容器使用ascend。
+预期见第2节；此条无NPU查询用runc。包版本检查通过后才进入第4.4节。后面的模型容器使用ascend。
 
 ### 4.4 复制镜像，在228和238各创建一个容器
 
-238执行：
+先完成第4.3节，确认pool镜像及包版本。238执行；镜像不存在或导出失败时，不计算校验值，也不要复制tar：
 
 ```bash
-docker save -o /ssd_2/yuanwenliu/qwen3-cam-a2-v1.tar qwen3-cam:a2-pool-v1
-sha256sum /ssd_2/yuanwenliu/qwen3-cam-a2-v1.tar
+docker image inspect qwen3-cam:a2-pool-v1 >/dev/null && docker save -o /ssd_2/yuanwenliu/qwen3-cam-a2-v1.tar qwen3-cam:a2-pool-v1 && sha256sum /ssd_2/yuanwenliu/qwen3-cam-a2-v1.tar
+```
+
+上条命令成功后再复制到228：
+
+```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/runtime-config/deployment.env
 scp /ssd_2/yuanwenliu/qwen3-cam-a2-v1.tar "${SSH_USER}@${HOST_228_IP}:/ssd_2/yuanwenliu/"
 ```
@@ -556,4 +588,4 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 - [SGLang Qwen3](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/models/qwen3_moe.py)、[PD](https://github.com/sgl-project/sglang/blob/f620d73/docs/docs/advanced_features/pd_disaggregation.mdx)、[NPU MemCache](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/mem_cache/storage/npu_memcache/README.md)及本仓库NPU pyproject。
 - [MemCache API版本说明](https://raw.githubusercontent.com/Ascend/memcache/master/doc/install_whl.md)、[1.1.0包元数据](https://pypi.org/pypi/memcache-hybrid/1.1.0/json)、[MemFabric1.1.0元数据](https://pypi.org/pypi/memfabric-hybrid/1.1.0/json)；wheel和SHA256见docker/requirements-pool.txt。
 
-本次通过14项CPU测试、41段Bash命令及Python/shell语法检查。测试覆盖个人路径、228/238启动角色、ascend/八卡/IPC参数及挂载范围；这些不等于目标实机验收。本次未在228/238实际创建容器，也未构建或运行A2模型。
+本次通过14项CPU测试、46段Bash命令及Python/shell语法检查；文档检查包含legacy构建命令及镜像存在性前置条件。测试覆盖个人路径、228/238启动角色、ascend/八卡/IPC参数及挂载范围；这些不等于目标实机验收。本次未在228/238实际创建容器，也未构建或运行A2模型。
