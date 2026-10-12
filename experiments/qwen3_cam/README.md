@@ -188,7 +188,7 @@ docker run --rm --network=host --runtime=runc -e HTTP_PROXY -e HTTPS_PROXY -e NO
 
 --network=host让构建容器能连接238本机代理；它与后面推理容器的设备配置无关。构建时用--build-arg传HTTP_PROXY/HTTPS_PROXY/NO_PROXY及小写变量，**只写变量名，不在命令中展开含密码的URL**。这些是Docker预定义代理参数，无需在Dockerfile添加ARG/ENV；本次不把代理永久写入镜像，也不修改Docker daemon全局代理。[Docker代理构建参数说明](https://docs.docker.com/build/building/variables/#proxy-arguments)。
 
-新开宿主机终端要重新设置代理，不能只传一次给旧容器。Ubuntu源、PyPI以及pool wheel所在的files.pythonhosted.org都须经代理可达；403/407通常需要检查访问策略/认证，证书错误按组织CA处理，不关闭TLS校验。
+新开宿主机终端要重新设置代理，不能只传一次给旧容器。Ubuntu源、PyPI以及pool wheel所在的files.pythonhosted.org都须经代理可达；403/407通常需要检查访问策略/认证。构建阶段保持TLS校验，证书错误按组织CA处理；第4.5节另提供用户选择的、仅作用于权重下载进程的临时跳过校验方式，不影响Docker构建或pip。
 
 **第二步：只构建core。**这里不会启动模型：
 
@@ -291,13 +291,34 @@ source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228
 docker exec -it -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY -e http_proxy -e https_proxy -e no_proxy qwen3-cam-a2-v3 /bin/bash
 ```
 
-进入后使用Python3.11独立下载环境；不加载模型，不source开启offline模式的env.sh。代理同时供pip安装ModelScope和下载权重使用：
+**4.5.1 准备下载环境。**进入后使用Python3.11独立下载环境；不加载模型，不source开启offline模式的env.sh。代理同时供pip安装ModelScope和下载权重使用。已有下载venv且ModelScope安装成功时跳过创建和安装，不必重装：
 
 ```bash
 unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 python -m venv /ssd_2/yuanwenliu/qwen3-download-venv
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -m pip install modelscope
+```
+
+**4.5.2 下载权重：本次实验临时跳过TLS证书校验。**238已出现`CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`；按用户要求，下面只在这一个Python进程里将Requests的发送参数设为`verify=False`，覆盖模型文件列表查询及权重下载（含重定向），不修改已安装包、系统证书、镜像、pip或Git设置。进程结束即失效。**这会失去服务器身份验证，存在中间人篡改模型/配置的风险，仅用于可信实验网络；正式使用应安装组织CA并恢复校验。**保留`InsecureRequestWarning`提醒；它不等于下载失败。[Requests官方说明](https://requests.readthedocs.io/en/latest/user/advanced/#ssl-cert-verification)。
+
+在当前238下载容器终端保留代理，执行下面两行。`REQUESTS_CA_BUNDLE`为空不是关闭校验的方法；此处在发送前明确覆盖`verify`，也覆盖先前CA变量的影响：
+
+```bash
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+/ssd_2/yuanwenliu/qwen3-download-venv/bin/python -c 'import requests; send=requests.sessions.Session.send; requests.sessions.Session.send=lambda self,request,**kwargs: send(self,request,**dict(kwargs,verify=False)); from modelscope import snapshot_download; print(snapshot_download("Qwen/Qwen3-30B-A3B", local_dir="/ssd_2/yuanwenliu/models/Qwen3-30B-A3B"))'
+```
+
+ModelScope使用现有下载目录/缓存继续处理，不删除已有文件。下载报错时停在4.5.2，不执行校验、复制或模型启动；`config.json`不存在通常是下载未完成的后续结果，而非需要重建Docker。不要在另一终端同时下载到同一目录。已安装ModelScope后出现的`ms-service-profiler`缺依赖警告，不是这次HTTPS证书错误的原因，不要为此批量升级推理依赖。
+
+后续配置好可信CA时，将上述下载命令替换为正常校验命令即可；无需重建镜像：
+
+```bash
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -c 'from modelscope import snapshot_download; print(snapshot_download("Qwen/Qwen3-30B-A3B", local_dir="/ssd_2/yuanwenliu/models/Qwen3-30B-A3B"))'
+```
+
+**4.5.3 下载命令成功返回后，再校验文件。**下面检查配置和索引中列出的分片是否存在且非空；不能把这项检查或两机SHA256相同当作来源可信的证明，特别是下载和远端校验信息都来自未验证的连接时：
+
+```bash
 mkdir -p /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/results
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -m pip freeze > /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/results/download-versions.txt
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -c 'import json; from pathlib import Path; p=Path("/ssd_2/yuanwenliu/models/Qwen3-30B-A3B"); c=json.loads((p/"config.json").read_text()); expected={"model_type":"qwen3_moe","num_hidden_layers":48,"num_experts":128,"num_experts_per_tok":8,"num_key_value_heads":4,"head_dim":128}; assert all(c.get(k)==v for k,v in expected.items()),c; i=json.loads((p/"model.safetensors.index.json").read_text()); shards=set(i["weight_map"].values()); assert all((p/n).is_file() and (p/n).stat().st_size>0 for n in shards); print("MODEL_FILES_PASS",len(shards))'
