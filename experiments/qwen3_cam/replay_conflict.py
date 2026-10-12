@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--tp-mib", type=int, default=8)
     parser.add_argument("--moe-mib", type=int, default=8)
     parser.add_argument("--kv-mib", type=int, default=64)
-    parser.add_argument("--kv-target", choices=["a", "b"], default="a")
+    parser.add_argument("--kv-target", choices=["228", "238"], default="228")
     args = parser.parse_args()
     if min(args.iterations, args.tp_mib, args.moe_mib, args.kv_mib) <= 0 or args.warmup < 0:
         raise ValueError("Invalid benchmark sizes/iterations")
@@ -44,7 +44,7 @@ def main():
             selected_tp = SimpleNamespace(ranks=members, rank_in_group=members.index(rank), device_group=pg)
     ep = dist.new_group(list(range(4, 12)), backend="hccl")
     kv_pairs = []
-    destination = 4 if args.kv_target == "a" else 8
+    destination = 4 if args.kv_target == "228" else 8
     own_pair = None
     for i in range(4):
         members = [destination + i, 12 + i]

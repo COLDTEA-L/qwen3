@@ -6,5 +6,5 @@ COPY requirements-pool.txt /opt/qwen3-cam/
 RUN python -m pip install --no-cache-dir --no-deps --require-hashes --requirement /opt/qwen3-cam/requirements-pool.txt
 RUN python -c 'import importlib.metadata as m; assert m.version("memfabric-hybrid")=="1.1.0"; assert m.version("memcache-hybrid")=="1.1.0"; assert m.version("torch")=="2.10.0+cpu"; assert m.version("torch-npu")=="2.10.0"; assert m.version("sgl-kernel-npu")=="2026.6.1"'
 RUN python -m pip freeze > /opt/qwen3-cam/pool-freeze.txt
-WORKDIR /ssd_2/sglang
+WORKDIR /ssd_2/yuanwenliu/sglang
 CMD ["/bin/bash"]

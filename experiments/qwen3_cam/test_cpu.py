@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,7 @@ class CamTests(unittest.TestCase):
         self.assertIn("--privileged", args)
         self.assertEqual(args[args.index("--runtime")+1], "ascend")
         self.assertEqual(args[args.index("--ipc")+1], "host")
+        self.assertEqual(args[args.index("--workdir")+1], "/ssd_2/yuanwenliu/sglang")
         self.assertIn("ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7", args)
         devices = [args[i+1] for i,x in enumerate(args) if x == "--device"]
         self.assertEqual(len(devices), 11)
@@ -52,20 +54,23 @@ class CamTests(unittest.TestCase):
         self.assertFalse(any(m.split(":",1)[0] in ("/home", "/data", "/var") for m in mounts))
         self.assertFalse(any("opensora" in m.lower() or "open-sora" in m.lower() for m in mounts))
         self.assertFalse(any("/firmware" in m for m in mounts))
-        self.assertIn("/ssd_2/sglang:/ssd_2/sglang:rw", mounts)
+        self.assertIn("/ssd_2/yuanwenliu/sglang:/ssd_2/yuanwenliu/sglang:rw", mounts)
 
     def test_runtime_config(self):
-        result = runtime_config.render("192.0.2.1", "192.0.2.2", "testuser")
+        result = runtime_config.render("192.0.2.228", "192.0.2.238", "testuser")
         pool, client = (json.loads(result[name]) for name in ("pool.json", "client.json"))
         self.assertEqual(pool["hbm_size"], "8GB")
         self.assertEqual(client["hbm_size"], 0)
         self.assertEqual(client["dram_size"], 0)
-        self.assertEqual(client["meta_service_url"], "tcp://192.0.2.2:5000")
+        self.assertEqual(client["meta_service_url"], "tcp://192.0.2.238:5000")
+        self.assertIn("export HOST_228_IP=192.0.2.228", result["deployment.env"])
+        self.assertIn("export HOST_238_IP=192.0.2.238", result["deployment.env"])
+        self.assertNotIn("8.146.225.22", "".join(result.values()))
         with self.assertRaises(ValueError):
-            runtime_config.render("192.0.2.1", "192.0.2.1", "testuser")
+            runtime_config.render("192.0.2.228", "192.0.2.228", "testuser")
 
     def test_runtime_write_guard(self):
-        configs = runtime_config.render("192.0.2.1", "192.0.2.2", "testuser")
+        configs = runtime_config.render("192.0.2.228", "192.0.2.238", "testuser")
         with tempfile.TemporaryDirectory() as directory:
             runtime_config.write_configs(directory, configs)
             path = Path(directory) / "client.json"
@@ -75,11 +80,52 @@ class CamTests(unittest.TestCase):
                 runtime_config.write_configs(directory, configs)
             self.assertEqual(path.read_text(), original)
 
+    def test_runtime_cli(self):
+        program = Path(__file__).with_name("configure_runtime.py")
+        result = subprocess.run([sys.executable, str(program), "--help"],
+                                check=True, capture_output=True, text=True)
+        self.assertIn("--ip-228", result.stdout)
+        self.assertIn("--ip-238", result.stdout)
+        self.assertNotIn("--a-ip", result.stdout)
+
+    def test_personal_paths(self):
+        configs = runtime_config.render("192.0.2.228", "192.0.2.238", "testuser")
+        text = configs["deployment.env"]
+        self.assertIn("/ssd_2/yuanwenliu/models/Qwen3-30B-A3B", text)
+        self.assertIn("/ssd_2/yuanwenliu/umdk-qwen3-cam", text)
+        args = self.container_arguments("")
+        sources = [args[i+1].split(":",1)[0] for i,x in enumerate(args) if x == "-v"]
+        work = [p for p in sources if p.startswith("/ssd_2/")]
+        self.assertEqual(len(work), 4)
+        self.assertTrue(all(p.startswith("/ssd_2/yuanwenliu/") for p in work))
+
+    def test_launch_roles(self):
+        launch = Path(__file__).with_name("launch.sh")
+        # Render the final argument arrays instead of executing Python/model code.
+        source = launch.read_text()
+        invocation = 'exec python -m sglang.launch_server "${common[@]}" "${args[@]}" "$@"'
+        self.assertEqual(source.count(invocation), 1)
+        source = source.replace(invocation, 'printf "%s\\0" "${common[@]}" "${args[@]}" "$@"')
+        environment = {**os.environ, "MODEL_PATH":"/ssd_2/yuanwenliu/models/Qwen3-30B-A3B",
+                       "HOST_228_IP":"192.0.2.228", "ASCEND_MF_STORE_URL":"tcp://192.0.2.228:7100"}
+        for role, tp, ep, base, node in (("p-228", "4", "4", "0", "0"),
+                                       ("d-228", "8", "8", "4", "0"),
+                                       ("d-238", "8", "8", "0", "1")):
+            result = subprocess.run(["bash", "-c", source, str(launch), role],
+                                    env=environment, check=True, capture_output=True)
+            args = result.stdout.decode().rstrip("\0").split("\0")
+            for flag, value in (("--tp-size",tp),("--ep-size",ep),
+                                ("--base-gpu-id",base),("--node-rank",node)):
+                self.assertEqual(args[args.index(flag)+1], value)
+            if role.startswith("d-"):
+                self.assertEqual(args[args.index("--dist-init-addr")+1], "192.0.2.228:29500")
+                self.assertEqual(args[args.index("--attn-dp-size")+1], "2")
+
     def test_role_mappings(self):
         for filename, ranks, expected in (
-            ("p_a", range(4), (0, 1, 2, 3)),
-            ("d_a", range(4), (4, 5, 6, 7)),
-            ("d_b", range(4, 8), (0, 1, 2, 3)),
+            ("p_228", range(4), (0, 1, 2, 3)),
+            ("d_228", range(4), (4, 5, 6, 7)),
+            ("d_238", range(4, 8), (0, 1, 2, 3)),
         ):
             cfg = cam.CamConfig.from_dict(json.loads((Path(__file__).parent / f"configs/{filename}.json").read_text()))
             self.assertEqual(cfg.cam_group(ranks), expected)
@@ -122,7 +168,7 @@ class CamTests(unittest.TestCase):
             self.assertEqual(result[:n], [sum(values) for values in zip(*inputs)])
 
     def test_analysis(self):
-        base = dict(mode="cam-detour", kv_target="a", tp_mib=8, moe_mib=8, kv_mib=64,
+        base = dict(mode="cam-detour", kv_target="228", tp_mib=8, moe_mib=8, kv_mib=64,
                     rank=4, flow="moe")
         result = analysis.summarize([{**base, "case": "moe", "samples_ms": [1, 1, 1]},
                                      {**base, "case": "moe+kv", "samples_ms": [2, 2, 2]}])

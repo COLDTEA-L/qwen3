@@ -2,6 +2,6 @@ __pycache__/
 *.pyc
 results/
 profiles/
-runtime-config/
+runtime-config*/
 *.log
 docker/source-pyproject_npu.toml

@@ -24,8 +24,8 @@ query Identity id
 query CPU-architecture uname -m
 query OS cat /etc/os-release
 query Host-memory free -h
-query SSD-filesystem df -hT /ssd_2
-query SSD-mount findmnt -T /ssd_2 -o TARGET,SOURCE,FSTYPE
+query SSD-filesystem df -hT /ssd_2/yuanwenliu
+query SSD-mount findmnt -T /ssd_2/yuanwenliu -o TARGET,SOURCE,FSTYPE
 query Host-shared-memory df -h /dev/shm
 query Docker-client-server docker version
 query Docker-storage docker info --format 'ServerVersion={{.ServerVersion}} Architecture={{.Architecture}} StorageDriver={{.Driver}} DockerRootDir={{.DockerRootDir}}'

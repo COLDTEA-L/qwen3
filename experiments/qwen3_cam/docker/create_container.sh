@@ -6,6 +6,7 @@ build_container_command() {
   local number device
   container_command=(docker run -itd --name "$container" --privileged
     --network host --ipc host --runtime ascend
+    --workdir /ssd_2/yuanwenliu/sglang
     --ulimit memlock=-1:-1 -e ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7)
   for number in {0..7}; do
     container_command+=(--device "/dev/davinci${number}")
@@ -18,10 +19,10 @@ build_container_command() {
     -v "$npu_cli:/usr/local/bin/npu-smi:ro"
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
     -v /var/log/npu:/usr/slog:rw
-    -v /ssd_2/sglang:/ssd_2/sglang:rw
-    -v /ssd_2/umdk:/ssd_2/umdk:rw
-    -v /ssd_2/models/Qwen3-30B-A3B:/ssd_2/models/Qwen3-30B-A3B:rw
-    -v /ssd_2/qwen3-download-venv:/ssd_2/qwen3-download-venv:rw)
+    -v /ssd_2/yuanwenliu/sglang:/ssd_2/yuanwenliu/sglang:rw
+    -v /ssd_2/yuanwenliu/umdk-qwen3-cam:/ssd_2/yuanwenliu/umdk-qwen3-cam:rw
+    -v /ssd_2/yuanwenliu/models/Qwen3-30B-A3B:/ssd_2/yuanwenliu/models/Qwen3-30B-A3B:rw
+    -v /ssd_2/yuanwenliu/qwen3-download-venv:/ssd_2/yuanwenliu/qwen3-download-venv:rw)
   if [ -n "$firmware" ]; then
     container_command+=(-v "$firmware:/usr/local/Ascend/firmware:ro")
   fi
@@ -44,8 +45,8 @@ if docker container inspect "$container" >/dev/null 2>&1; then
   echo "Container already exists: $container; inspect it, do not overwrite" >&2
   exit 2
 fi
-for directory in /ssd_2/sglang /ssd_2/umdk /ssd_2/models/Qwen3-30B-A3B \
-  /ssd_2/qwen3-download-venv /usr/local/Ascend/driver /usr/local/dcmi /var/log/npu; do
+for directory in /ssd_2/yuanwenliu/sglang /ssd_2/yuanwenliu/umdk-qwen3-cam /ssd_2/yuanwenliu/models/Qwen3-30B-A3B \
+  /ssd_2/yuanwenliu/qwen3-download-venv /usr/local/Ascend/driver /usr/local/dcmi /var/log/npu; do
   test -d "$directory" || { echo "Required host directory missing: $directory" >&2; exit 2; }
 done
 if [ -f /usr/local/bin/npu-smi ]; then

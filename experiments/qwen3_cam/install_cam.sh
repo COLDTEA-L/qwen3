@@ -2,7 +2,7 @@
 # Dedicated container only; matching CANN/Python/Torch ABI is required.
 set -euo pipefail
 action="${1:?usage: bash install_cam.sh build|install}"
-root=/ssd_2/umdk
+root="${UMDK_PATH:?Source the current env.sh first}"
 soc="${SOC_VERSION:?Source env.sh first}"
 case "$action" in
   build) bash "$root/build/cam/comm_operator/build_qwen3_all2all_detour.sh" "$soc" ;;

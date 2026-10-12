@@ -70,7 +70,7 @@ query OS cat /etc/os-release
 query CANN-env-paths find /usr/local/Ascend -maxdepth 4 -name set_env.sh -print
 query Device-nodes ls -l /dev/davinci{0..7} /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc
 query NPU-status npu-smi info
-query SSD-mount ls -ld /ssd_2
+query SSD-mount ls -ld /ssd_2/yuanwenliu
 query Shared-memory df -h /dev/shm
 query CANN-version-files bash -c '
   find /usr/local/Ascend -maxdepth 4 -type f \( -name version.cfg -o -name ascend_toolkit_install.info \) -print -exec cat {} \;

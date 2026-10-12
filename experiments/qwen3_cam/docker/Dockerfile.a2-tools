@@ -15,6 +15,6 @@ RUN apt-get update && \
       unzip zip rsync iproute2 iputils-ping net-tools && \
     apt-get clean
 
-# Source and runtime data are mounted from the same /ssd_2 path on both hosts.
-WORKDIR /ssd_2/sglang
+# Source and runtime data are mounted from the same /ssd_2/yuanwenliu path on both hosts.
+WORKDIR /ssd_2/yuanwenliu/sglang
 CMD ["/bin/bash"]

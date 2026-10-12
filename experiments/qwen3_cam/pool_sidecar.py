@@ -1,6 +1,6 @@
-"""Keep four B-host relay windows and optional MemCache HBM pools alive.
+"""Keep four 238-host relay windows and optional MemCache HBM pools alive.
 
-Launch on B with torchrun --nproc_per_node=4; no torch distributed PG is needed.
+Launch on 238 with torchrun --nproc_per_node=4; no torch distributed PG is needed.
 Use full physical visibility: LOCAL_RANK 0..3 selects NPU 4..7 here.
 """
 

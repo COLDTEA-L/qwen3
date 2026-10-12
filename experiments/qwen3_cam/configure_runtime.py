@@ -7,20 +7,23 @@ import shlex
 from pathlib import Path
 
 
-def render(a_ip, b_ip, ssh_user):
-    for value in (a_ip, b_ip):
+def render(ip_228, ip_238, ssh_user):
+    for value in (ip_228, ip_238):
         if ipaddress.ip_address(value).version != 4:
             raise ValueError("Use the mutually reachable IPv4 host addresses")
-    if a_ip == b_ip:
-        raise ValueError("A and B must be different hosts")
+    if ip_228 == ip_238:
+        raise ValueError("228 and 238 must be different hosts")
     if not ssh_user or any(c.isspace() for c in ssh_user):
         raise ValueError("SSH account must be nonempty and contain no whitespace")
-    values = {"A_IP": a_ip, "B_IP": b_ip, "A2_SSH_USER": ssh_user,
-              "HOST_IF_A": "enp67s0f5", "HOST_IF_B": "enp67s0f5",
-              "MODEL_PATH": "/ssd_2/models/Qwen3-30B-A3B"}
-    endpoint = {"meta_service_url": f"tcp://{b_ip}:5000",
-                "config_store_url": f"tcp://{b_ip}:6000"}
-    meta = {**endpoint, "metrics_url": f"http://{b_ip}:8100", "log_level": "info"}
+    task_root = "/ssd_2/yuanwenliu"
+    values = {"HOST_228_IP": ip_228, "HOST_238_IP": ip_238, "SSH_USER": ssh_user,
+              "HOST_IF_228": "enp67s0f5", "HOST_IF_238": "enp67s0f5",
+              "EXPERIMENT_ROOT": task_root,
+              "UMDK_PATH": f"{task_root}/umdk-qwen3-cam",
+              "MODEL_PATH": f"{task_root}/models/Qwen3-30B-A3B"}
+    endpoint = {"meta_service_url": f"tcp://{ip_238}:5000",
+                "config_store_url": f"tcp://{ip_238}:6000"}
+    meta = {**endpoint, "metrics_url": f"http://{ip_238}:8100", "log_level": "info"}
     pool = {**endpoint, "world_size": 32, "protocol": "device_rdma",
             "dram_size": 0, "hbm_size": "8GB", "max_hbm_size": "8GB", "log_level": "info"}
     client = {**pool, "hbm_size": 0, "max_hbm_size": 0}
@@ -43,14 +46,14 @@ def write_configs(directory, configs):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--a-ip")
-    p.add_argument("--b-ip")
+    p.add_argument("--ip-228", dest="ip_228")
+    p.add_argument("--ip-238", dest="ip_238")
     p.add_argument("--ssh-user")
     p.add_argument("--output-dir", type=Path, default=Path(__file__).parent / "runtime-config")
     args = p.parse_args()
-    configs = render(args.a_ip or input("A host IPv4: ").strip(),
-                     args.b_ip or input("B host IPv4: ").strip(),
-                     args.ssh_user or input("A2 SSH account: ").strip())
+    configs = render(args.ip_228 or input("228 host IPv4: ").strip(),
+                     args.ip_238 or input("238 host IPv4: ").strip(),
+                     args.ssh_user or input("SSH account for 228/238: ").strip())
     write_configs(args.output_dir, configs)
     print("PRIVATE_CONFIG_READY", args.output_dir, "(not committed to Git)")
 
