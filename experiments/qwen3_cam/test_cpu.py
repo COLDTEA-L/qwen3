@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,35 @@ spec4.loader.exec_module(runtime_config)
 
 
 class CamTests(unittest.TestCase):
+    def container_arguments(self, firmware):
+        helper = Path(__file__).parent / "docker/create_container.sh"
+        program = 'source "$1"; build_container_command image:test test-container /usr/local/bin/npu-smi "$2"; printf "%s\\0" "${container_command[@]}"'
+        result = subprocess.run(["bash", "-c", program, "test", str(helper), firmware],
+                                check=True, capture_output=True)
+        return result.stdout.decode().rstrip("\0").split("\0")
+
+    def test_container_profile(self):
+        args = self.container_arguments("/usr/local/Ascend/firmware")
+        self.assertIn("--privileged", args)
+        self.assertEqual(args[args.index("--runtime")+1], "ascend")
+        self.assertEqual(args[args.index("--ipc")+1], "host")
+        self.assertIn("ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7", args)
+        devices = [args[i+1] for i,x in enumerate(args) if x == "--device"]
+        self.assertEqual(len(devices), 11)
+        self.assertEqual(devices[:8], [f"/dev/davinci{i}" for i in range(8)])
+        self.assertIn("/usr/local/dcmi:/usr/local/dcmi:ro", args)
+        self.assertIn("/var/log/npu:/usr/slog:rw", args)
+        self.assertIn("/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro", args)
+
+    def test_container_mount_scope(self):
+        args = self.container_arguments("")
+        mounts = [args[i+1] for i,x in enumerate(args) if x == "-v"]
+        self.assertNotIn("/ssd_2:/ssd_2", mounts)
+        self.assertFalse(any(m.split(":",1)[0] in ("/home", "/data", "/var") for m in mounts))
+        self.assertFalse(any("opensora" in m.lower() or "open-sora" in m.lower() for m in mounts))
+        self.assertFalse(any("/firmware" in m for m in mounts))
+        self.assertIn("/ssd_2/sglang:/ssd_2/sglang:rw", mounts)
+
     def test_runtime_config(self):
         result = runtime_config.render("192.0.2.1", "192.0.2.2", "testuser")
         pool, client = (json.loads(result[name]) for name in ("pool.json", "client.json"))
