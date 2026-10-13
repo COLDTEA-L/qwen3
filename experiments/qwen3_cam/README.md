@@ -6,7 +6,7 @@
 
 **网络边界：有卡服务器与无卡开发服务器8.146.225.22不互通。代码通过GitHub/GitCode发布、拉取；运行时只在228/238之间通信，不连接开发服务器。两台有卡服务器彼此仍需主机控制网和NPU数据网互通。**
 
-当前交付为源码、配置和工具。用户已反馈镜像构建、权重准备及228预检查通过；实际P/D启动仍失败：D的NPU Tensor布尔判断错误已修复，P的TransferEngine初始化失败仍需按第5/14节复测。完整通信正确性、模型质量和性能尚未验收，不能将预检查通过当作运行成功。
+当前交付为源码、配置和工具。用户已反馈镜像构建、权重准备、228预检查及PD store启动通过；实际P/D启动仍失败：D的NPU Tensor布尔判断错误已修复，P的后续日志显示组同步/注册更新与join超时，按14.2干净复测。完整通信正确性、模型质量和性能尚未验收，不能将预检查或单个worker通过当作运行成功。
 
 ## 1 实验布局与版本
 
@@ -387,7 +387,7 @@ python experiments/qwen3_cam/preflight.py --config experiments/qwen3_cam/configs
 python -u experiments/qwen3_cam/start_pd_store.py
 ```
 
-要求看到`PD_STORE_READY store=tcp://228的配置IP:7100`。此进程只创建配置存储，不加载模型、不分配模型/NPU缓存；保留SDK的TLS默认设置，不继承权重下载的跳过证书校验补丁。7100不是HTTP服务，不用curl访问。不与238上MemCache的5000/6000服务混用。若7100已被占用，脚本报错停止：核对是不是自己的旧store，不自动接管或杀掉任何进程。后续所有P/D重启仍需保留这个store终端。
+要求看到`PD_STORE_READY store=tcp://228的配置IP:7100`。此进程只创建配置存储，不加载模型、不分配模型/NPU缓存；保留SDK的TLS默认设置，不继承权重下载的跳过证书校验补丁。7100不是HTTP服务，不用curl访问。不与238上MemCache的5000/6000服务混用。若7100已被占用，脚本报错停止：核对是不是自己的旧store，不自动接管或杀掉任何进程。**正常运行时保留store；若发生join/update超时并要做干净复测，先退出全部自己的P/D/Router，再最后停止并重建自己的PD store，见14.2。不要仅重启P而默认旧store无残留状态。**
 
 store启动后，228 P窗口检查：
 
@@ -425,7 +425,7 @@ set -o pipefail
 bash experiments/qwen3_cam/launch.sh d-238 --context-length 4096 --max-running-requests 4 2>&1 | tee "experiments/qwen3_cam/results/d-238-startup-$(date +%Y%m%d-%H%M%S).log"
 ```
 
-D两端都启动才完成建组。SGLang自己起模型worker，**不套16进程torchrun**。检查P/D日志中的`ASCEND_TRANSFER_INIT`地址/物理卡号和`ASCEND_TRANSFER_READY`，待权重加载/EP/PD初始化成功再启动Router；有失败先看14.1，不因看到HTTP错误而重新下载权重。228终端3（同样进入容器并source env.sh 228）启动Router：
+D两端都启动才完成建组。SGLang自己起模型worker，**不套16进程torchrun**。检查P/D日志中的`ASCEND_TRANSFER_INIT`地址/物理卡号和`ASCEND_TRANSFER_READY`，待权重加载/EP/PD初始化成功再启动Router；一般失败看14.1，join/update超时看14.2，不因看到HTTP错误而重新下载权重。228终端3（同样进入容器并source env.sh 228）启动Router：
 
 ```bash
 python -m sglang_router.launch_router --pd-disaggregation --prefill "http://${HOST_228_IP}:30000" --decode "http://${HOST_228_IP}:30001" --host 0.0.0.0 --port 8000
@@ -439,7 +439,7 @@ curl --fail-with-body http://127.0.0.1:8000/generate -H 'Content-Type: applicati
 
 验收：合理文本、P→D迁移成功；日志/trace确认D EP8=228卡4–7+238卡0–3、Attention两组同机TP4。OOM先排查其他进程/上下文/临时内存，不能悄悄退化EP1或假传输。最终环境已将MemFabric升级到1.1.0，必须在这个环境通过PD，不沿用旧镜像结论。
 
-结束本步：在自己的终端Ctrl+C，先Router、再P/D，确认子进程释放卡。PD store不占模型卡，继续后续实验可保留；结束整套实验时最后停止它。不要pkill python、stop原SGLang容器或停止别人的任务。
+结束本步：在自己的终端Ctrl+C，先Router、再P/D，确认子进程释放卡。PD store不占模型卡，正常完成后继续实验可保留；结束整套实验时最后停止它。失败后的干净复测按14.2重建自己的store，不混用旧worker和新worker。不要pkill python、stop原SGLang容器或停止别人的任务。
 
 ## 6 编译CAM并做单机8卡正确性测试
 
@@ -641,6 +641,7 @@ python experiments/qwen3_cam/analyze_replay.py experiments/qwen3_cam/results/rep
 | Ignore import error ...qwen3_5...fused_sigmoid_mul | 模型扫描警告；检查真正退出的traceback是否来自目标Qwen3，不直接升级kernel |
 | Boolean value of Tensor ... ambiguous | NPU Tensor与Host缓存初始化的兼容性问题，更新本分支修复；不是OOM |
 | Ascend Transfer Engine initialization failed | 第5.2的PD store、明确的session IP，以及新版日志ret/native_error；不盲目退回SDMA |
+| TRANS_D_*_GW持续超时，随后update/join timeout | 组同步未完成；按14.2排除失败轮残留，再隔离P启动，不能仅凭此诊断OOM或缺少某张D卡 |
 | EP/PD/Pool网络失败 | 当前后端DEVICE_RDMA、接口/端口与各NPU网络健康 |
 | CAM等待 | 全部8 owner、10067、comm_id7、物理rank映射/IPC权限 |
 | 有日志无CAM_CALL | MODE/配置及融合是否绕过接入点 |
@@ -661,7 +662,7 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 | --- | --- | --- |
 | 228/238 D：pool_host/mha.py 的Tensor布尔值错误 | NPUMHATokenToKVPool默认用连续的全层Tensor；通用代码误用`buffers or ()` | 对None显式判断，并逐层遍历Tensor或列表，不复制缓存、不改变设备传输算子；覆盖空值、列表、元组、Tensor形式回归测试 |
 | 未显式开启HiCache却进入Host池 | 当前Decode回退策略会自动选host_pool，引发本地Host池构建；不是远端Pool4已经运行 | 原生PD脚本固定cpu_tensor回退备份；P端远端HiCache仍须第7节实测 |
-| P：TransferEngine.initialize返回非零 | 日志仅给通用异常，无法确认具体store/地址/RDMA/驱动原因；旧流程未明确创建PD store | 增加前台PD store、两机TCP预检查、明确SGLANG_HOST_IP、原生ret/native_error日志；尚未证明实机初始化成功 |
+| P：TransferEngine.initialize返回非零 | 初报仅给通用异常；后续日志显示GW同步等待及update/join超时，见14.2 | store已由用户成功启动；继续隔离同步问题，不把TCP预检查当作RDMA/组同步通过 |
 | HTTPConnectionPool | 这份附件未给host/port/URL，不能断定公网下载；也可能是P退出后的服务连接失败或残留代理 | 推理source时清理下载代理；保留完整HTTP行，按目标区分公网与228/238服务 |
 | fused_sigmoid_mul缺失且前缀Ignore import error | qwen3_5在模型扫描时被跳过；不是Qwen3-30B本身的致命异常 | 不升级kernel，不把警告当根因；预检查增加目标NPU KV IO API检查 |
 | 怀疑OOM | 附件这几段没有OutOfMemory异常，也不能证明不存在更早native内存错误 | 不凭这些traceback改变P/D配比、量化或降EP；保留第一条native错误及npu-smi快照 |
@@ -700,6 +701,59 @@ export SGLANG_ASCEND_MF_LOG_LEVEL=0
 **验证边界：**19项CPU/模拟回归测试和命令语法检查通过，仅验证Tensor表示处理、环境设置、参数构造和错误信息传递；没有在228/238实际执行NPU Host缓存搬运、启动RDMA引擎或验证推理质量。D实际启动、P/D迁移以及第7节远端Pool都仍需实机验收。
 
 **Tensor修复的专项实机复测：**cpu_tensor基线不会覆盖原先触发错误的D host_pool分支。原生PD通过后，可正常结束自己的Router和两端D，再在228/238的D启动命令末尾分别追加`--disaggregation-decode-retraction-backup host_pool`，重启两端D并检查Host池初始化；需要支持回退机制时再验证真实备份/恢复。这项复测应单独记录，不与cpu_tensor基线混用。第7节P的HiCache还必须通过真实远端put/get和恢复，不能用一次启动成功替代搬运正确性测试。初次只排查启动时，先保持cpu_tensor基线。
+
+### 14.2 P的trans join failed：干净store与P单独复测
+
+用户反馈5.2的PD store正常，P在2026-10-13 09:56:07至09:56:47出现以下顺序：
+
+| 时间/日志 | 能确认什么 |
+| --- | --- |
+| 09:56:07：OpenDevice、AllocReserveGva成功，部分worker输出ASCEND_TRANSFER_READY | 已有worker完成引擎初始化，不能把整个失败解释成store未启动；GVA预留本身没有在此处失败 |
+| 持续等待TRANS_D_7_1_GW，每秒返回-601 timeout | 组同步完成标记没有及时出现，不等于服务器端口不通 |
+| 09:56:47：update timeout、register local failed、join timeout，随后trans join failed | 注册更新与新成员加入都受同步阻塞影响；外层-1不是唯一根因说明 |
+
+**结论：**目前定位为传输组同步没有完成，未在这段日志中看到直接的HBM分配失败；不能据此彻底排除其他成员更早的资源/通信错误，也不能声称确定是SDK bug。按[公开组同步实现](https://github.com/Ascend/memfabric_hybrid/blob/master/src/smem/csrc/net/smem_net_group_engine.cpp)，`_GW`是同步完成标记，前面的数字涉及组版本/同步序号；不能把`TRANS_D_7_1_GW`理解为“缺少D第7张卡”。MemFabric内部rank与模型TP/EP rank也不能直接等同。
+
+**第一步：保存日志，正常结束自己的全部旧worker，最后停止自己的store。**
+
+- 保留本轮P/D日志和最早的原生错误，不覆盖或删除结果文件。
+- 若自己的Router、228 P、228 D、238 D仍在运行，在各自前台终端Ctrl+C；确认它们的子进程已退出、占用已释放。不要杀他人的进程，也不要停止整个共享容器。
+- 最后在自己运行`start_pd_store.py`的窗口Ctrl+C。此次重建仅重置这个实验PD store的临时注册/协调状态，前提是其客户端都已停止；不删除模型权重、不清理远端KV Pool、不清理/dev/shm、不重置NPU。
+- 正常实验成功运行时可以保留store；失败隔离测试不能假定复用旧store一定安全。残留状态只是待排除的可能性，重建store不是已经证实的修复。
+
+**第二步：228重建独立store，保持前台。**如果是新窗口，先从宿主机docker exec进入实验容器；在228容器内执行：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228
+python -u experiments/qwen3_cam/start_pd_store.py
+```
+
+看到`PD_STORE_READY`后保留该窗口。端口仍被占用时停下核对自己的旧服务是否退出，不强行清端口、不另起第二个store。
+
+**第三步：只启动228 P，不启动两端D/Router/Pool。**在另一个228容器终端执行，先检查store可达，检查失败就停止：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228
+python experiments/qwen3_cam/preflight.py --config experiments/qwen3_cam/configs/p_228.json --model-path "$MODEL_PATH" --mode off --require-pool --import-model --check-pd-store
+export SGLANG_CAM_DETOUR_MODE=off
+export SGLANG_ASCEND_MF_LOG_LEVEL=0
+set -o pipefail
+bash experiments/qwen3_cam/launch.sh p-228 --context-length 4096 --max-running-requests 4 --chunked-prefill-size 1024 2>&1 | tee "experiments/qwen3_cam/results/p-228-isolated-$(date +%Y%m%d-%H%M%S).log"
+```
+
+这里仍是P4、EP4和device_rdma，不降低EP、不换成SDMA或fake、不重建镜像、不重新下载权重。应观察P的四个物理设备0–3分别输出`ASCEND_TRANSFER_READY`；单个worker ready不算P初始化整体通过。只测试P时还不能验证P→D迁移或完整推理质量。
+
+**第四步：根据结果继续，避免反复盲目重跑。**
+
+| 复测结果 | 下一步 |
+| --- | --- |
+| 干净store下P四个worker就绪、P正常启动 | 再按5.3启动228 D与238 D，两端都启动；记录问题是否仅在新D成员加入后出现。P/D均正常后才启动Router |
+| P单独仍出现GW/update/join超时 | 说明不需要新增D成员就能复现。保存这次隔离日志，下一步应做MemFabric最小初始化测试/核对兼容性，暂不加CAM/Pool或反复加载完整模型 |
+| 出现新的HCCL、RDMA、内存/映射错误 | 以第一条原生错误为依据，不把后续超时当成独立根因；补充对应设备健康和运行版本 |
+
+隔离测试完成或失败后，下次干净实验仍按“退出自己的worker→最后停止自己的store→新store→新worker”执行；不要在失败的旧组上反复加入新worker。首次干净P成功仅说明新store下这一轮成功，不能区分此前失败是残留状态还是并发时序所致，也不能凭一次结果证明底层问题已永久解决。
+
+**回传内容：**完整`p-228-isolated-*.log`，或四个worker的READY情况及最早native错误前后日志；如果新增D后失败，还需同轮的228/238 D日志及两机SGLang版本。前台store自身的raw TCP预检查可能打印“Failed to read header”，与GW等待超时不是同一种错误；按PD_STORE_READY、真实协议连接和本轮native日志分别判断。
 
 ## 15 依据与验证边界
 
