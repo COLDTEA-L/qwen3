@@ -324,18 +324,36 @@ mkdir -p /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/results
 /ssd_2/yuanwenliu/qwen3-download-venv/bin/python -c 'import json; from pathlib import Path; p=Path("/ssd_2/yuanwenliu/models/Qwen3-30B-A3B"); c=json.loads((p/"config.json").read_text()); expected={"model_type":"qwen3_moe","num_hidden_layers":48,"num_experts":128,"num_experts_per_tok":8,"num_key_value_heads":4,"head_dim":128}; assert all(c.get(k)==v for k,v in expected.items()),c; i=json.loads((p/"model.safetensors.index.json").read_text()); shards=set(i["weight_map"].values()); assert all((p/n).is_file() and (p/n).stat().st_size>0 for n in shards); print("MODEL_FILES_PASS",len(shards))'
 ```
 
-约60GB BF16权重，不选AWQ/GPTQ/FP8。已有完整权重可跳过下载但保留校验。下载结束exit返回238宿主机；这个exec会话的代理变量随会话结束。之后推理按第4.4节普通docker exec进入，228/238业务连接仍须直连，不经公网下载代理：
+**4.5.4 用scp从238复制到228，不依赖宿主机rsync。**约60GB BF16权重，不选AWQ/GPTQ/FP8。已有完整权重可跳过下载但保留校验。看到`MODEL_FILES_PASS`后，若仍在下载容器里，先执行`exit`返回238宿主机；这个exec会话的代理变量随会话结束。不要为了复制权重在容器中安装rsync，容器内安装不会给宿主机提供该命令。之后推理按第4.4节普通docker exec进入，228/238业务连接仍须直连，不经公网下载代理。
+
+下面在**238宿主机**逐行执行；先检查ssh/scp和源目录，再确认228目标目录空间。任一步失败就停止，228至少应有完整模型所需空间；登录使用228的SSH密码/密钥，不是代理密码：
 
 ```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/runtime-config/deployment.env
-rsync -a --info=progress2 /ssd_2/yuanwenliu/models/Qwen3-30B-A3B/ "${SSH_USER}@${HOST_228_IP}:/ssd_2/yuanwenliu/models/Qwen3-30B-A3B/"
+command -v ssh
+command -v scp
+du -sh /ssd_2/yuanwenliu/models/Qwen3-30B-A3B
+ssh "${SSH_USER}@${HOST_228_IP}" 'mkdir -p /ssd_2/yuanwenliu/models && df -h /ssd_2/yuanwenliu/models'
+scp -r /ssd_2/yuanwenliu/models/Qwen3-30B-A3B "${SSH_USER}@${HOST_228_IP}:/ssd_2/yuanwenliu/models/"
 ```
 
-两机宿主机各生成校验清单，内容应一致：
+目的地写**父目录models/**，最终路径是`/ssd_2/yuanwenliu/models/Qwen3-30B-A3B`，避免复制成两层同名模型目录。复制整个目录，不用`*`，保留隐藏文件。228已有同名文件会被覆盖，不删除目标目录中的额外文件；确认该目录只用于本次模型快照，不与其他版本共用。`scp -r`递归复制目录，见[OpenSSH说明](https://man.openbsd.org/scp#r)。
+
+scp不提供rsync式的断点增量续传，中断后重新执行可能重传已复制的文件；不要启动使用未完成权重的服务，也不要同时运行两个复制任务。复制失败时停在4.5.4，先处理网络/登录/空间错误。
+
+**4.5.5 复制成功后校验两机权重。**两机宿主机各生成校验清单，内容应一致：
 
 ```bash
 cd /ssd_2/yuanwenliu/models/Qwen3-30B-A3B
 find . -type f \( -name '*.safetensors' -o -name '*.json' \) -print0 | sort -z | xargs -0 sha256sum > /ssd_2/yuanwenliu/qwen3-model-sha256.txt
+```
+
+两机生成清单后，在**238宿主机**把238清单复制到228的独立文件名，并比较。下面命令成功且输出`MODEL_COPY_PASS`才进入4.6；`diff`有输出或文件校验失败时，不启动模型：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/runtime-config/deployment.env
+scp /ssd_2/yuanwenliu/qwen3-model-sha256.txt "${SSH_USER}@${HOST_228_IP}:/ssd_2/yuanwenliu/qwen3-model-sha256-238.txt"
+ssh "${SSH_USER}@${HOST_228_IP}" 'diff -u /ssd_2/yuanwenliu/qwen3-model-sha256-238.txt /ssd_2/yuanwenliu/qwen3-model-sha256.txt && cd /ssd_2/yuanwenliu/models/Qwen3-30B-A3B && sha256sum -c /ssd_2/yuanwenliu/qwen3-model-sha256-238.txt && echo MODEL_COPY_PASS'
 ```
 
 只下载一次快照再复制，避免两机分别下载漂移的main。权重/私有配置/results/profiles不进入Git。
