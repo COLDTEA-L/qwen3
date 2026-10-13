@@ -64,26 +64,13 @@ AllReduce的最后AllGather仍是HCCL；ReduceScatter不做这个AllGather。CAM
 
 除非写“容器内”，均在宿主机执行。代码/权重/镜像准备不加载模型；从第5节起须有获准使用的整套16卡窗口。不要停止他人任务。
 
-### 4.1 先发布源码，再由228/238拉取
+### 4.1 228/238拉取已发布的实验源码
 
-SGLang通过GitHub发布，UMDK通过现有GitCode发布；两台有卡机器不执行ssh/scp到开发服务器。先完成第13节的两次push，再在有卡机器操作。
+本节仅包含实验机器的代码获取操作。SGLang从GitHub拉取，UMDK从GitCode拉取；先确认代码托管站已有所需实验分支及本次修订，再在228/238执行。实验机器只拉取代码，不承担源码发布，也不执行ssh/scp到开发服务器。发布指令只在对话中提供，不放入本文档。
 
 **开发服务器的UMDK已经准备好了**：/home/liuyuanwen/umdk 当前分支为 feat/qwen3-cam-detour-build，HEAD为9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef，origin为 https://gitcode.com/yuanwenliu/umdk.git。这里“更新”是发布这个实验分支，不是pull最新master；否则可能丢掉需要的detour实现。不需要新建GitHub UMDK仓库。
 
-开发服务器先核对，然后发布：
-
-```bash
-cd /home/liuyuanwen/umdk
-git status --short --branch
-git remote get-url origin
-git show --no-patch --oneline feat/qwen3-cam-detour-build
-git switch feat/qwen3-cam-detour-build
-env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=1 git -c core.askPass= -c credential.helper= push -u origin feat/qwen3-cam-detour-build
-```
-
-现有src/cam/comm_operator/build是用户原来的未跟踪构建目录，不需要提交，**不要git add -A或清理它**。GitCode认证用GitCode自己的账户/token，不是GitHub PAT。推送不会把有卡机器连接到开发服务器。
-
-然后228、238各执行：
+228、238各执行：
 
 ```bash
 test -w /ssd_2/yuanwenliu
@@ -93,7 +80,7 @@ git -C /ssd_2/yuanwenliu/sglang rev-parse HEAD
 git -C /ssd_2/yuanwenliu/umdk-qwen3-cam rev-parse HEAD
 ```
 
-**228旧UMDK不动**；实验另外clone到umdk-qwen3-cam。若GitCode提示找不到分支，先确认开发服务器push成功，不改用旧master或别的all-to-all分支。若有卡机器也不能访问GitHub/GitCode，需用个人电脑或获准的中转渠道传输源码，不直接连接开发服务器。
+**228旧UMDK不动**；实验另外clone到umdk-qwen3-cam。若GitCode提示找不到分支，先确认所需分支已在代码托管站可见，不改用旧master或别的all-to-all分支。若有卡机器也不能访问GitHub/GitCode，需用个人电脑或获准的中转渠道传输源码，不直接连接开发服务器。
 
 已有本实验目标目录时不重复clone。确认工作区干净、origin正确，再更新：
 
@@ -637,32 +624,11 @@ python experiments/qwen3_cam/analyze_replay.py experiments/qwen3_cam/results/rep
 
 每条结论附版本/拓扑/路径、device时间线、独立/并发/干预数值和重复轮次。允许结果为“链路冲突”“HBM/DMA竞争但无同边冲突”“当前负载未发现冲突”，不填写假想百分比。
 
-## 13 Git push：两个仓库、两个发布平台
+## 13 代码同步边界：实验机器只拉取
 
-全部在**无卡开发服务器8.146.225.22**执行；不是在有卡机器的个人目录中执行。本文档与部署脚本只需push SGLang分支；UMDK现成的实验分支另push到GitCode。
+本文档仅指导228/238获取和运行已发布的实验源码，不包含源码发布命令。发布在开发侧单独处理，相关指令仅在对话中提供；不要在实验机器执行发布操作。
 
-**SGLang → GitHub：**
-
-```bash
-cd /home/liuyuanwen/sglang
-git status --short --branch
-git remote get-url publish
-env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=1 git -c core.askPass= -c credential.helper= push -u publish feat/qwen3-cam-detour-conflict
-```
-
-publish应为https://github.com/COLDTEA-L/qwen3.git。用户名COLDTEA-L，密码位置填GitHub PAT。
-
-**UMDK → GitCode：**
-
-```bash
-cd /home/liuyuanwen/umdk
-git remote get-url origin
-env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=1 git -c core.askPass= -c credential.helper= push -u origin feat/qwen3-cam-detour-build
-```
-
-origin应为https://gitcode.com/yuanwenliu/umdk.git。使用GitCode账户及对应token/密码，不是GitHub PAT。不要为了push把未跟踪的旧构建产物一并提交。
-
-推送成功后，228/238按第4.1节从各代码托管站clone或ff-only更新。发布站只负责源码流转，不承担任何服务运行期通信。
+实验机器按第4.1节从GitHub/GitCode克隆或ff-only更新，核对两机版本一致。有本地改动时停止并保留，不强行覆盖。代码托管站只负责源码流转，不承担任何服务运行期通信。
 
 ## 14 失败定位与安全停止
 
@@ -704,7 +670,7 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 
 **已有容器的恢复步骤：**
 
-1. 在开发服务器按13节push本次SGLang分支；本轮不需要重新push UMDK。
+1. 确认代码托管站已有本次SGLang修订；本轮只更新SGLang，UMDK保持现有实验版本。本文档不包含开发侧发布操作。
 2. 正常结束自己的旧P/D和Router，避免旧worker继续使用旧源码。不要停他人的任务。
 3. 228、238宿主机各执行下面更新，确认HEAD相同。GitHub访问仍按获准方式设置宿主代理；有本地改动就停下，不reset、不清理。容器挂载该源码目录，所以无需重建Docker、重装kernel或重新下载权重。
 
