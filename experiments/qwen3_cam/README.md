@@ -1,12 +1,12 @@
 # Qwen3-30B-A3B：A2 两机部署与流量冲突验证
 
-更新：2026-10-12。服务器以228、238指代；两机各8张910B4、32GB HBM，机内FullMesh/HCCS，个人工作目录均为 /ssd_2/yuanwenliu。
+更新：2026-10-13。服务器以228、238指代；两机各8张910B4、32GB HBM，机内FullMesh/HCCS，个人工作目录均为 /ssd_2/yuanwenliu。
 
 执行顺序：拉代码 → 私有配置 → 构建/复制镜像 → 每机创建一个实验容器 → 下载权重 → 原生PD → CAM正确性 → KV Pool → 三模式对照与冲突测量。每个命令块逐行执行；不用输入续行反斜杠。
 
 **网络边界：有卡服务器与无卡开发服务器8.146.225.22不互通。代码通过GitHub/GitCode发布、拉取；运行时只在228/238之间通信，不连接开发服务器。两台有卡服务器彼此仍需主机控制网和NPU数据网互通。**
 
-当前交付为源码、配置和工具。目标A2上的构建、通信正确性、模型质量和性能尚未实测；必须通过各步验收再往后走。
+当前交付为源码、配置和工具。用户已反馈镜像构建、权重准备及228预检查通过；实际P/D启动仍失败：D的NPU Tensor布尔判断错误已修复，P的TransferEngine初始化失败仍需按第5/14节复测。完整通信正确性、模型质量和性能尚未验收，不能将预检查通过当作运行成功。
 
 ## 1 实验布局与版本
 
@@ -149,7 +149,7 @@ python3 experiments/qwen3_cam/configure_runtime.py
 
 本节在**238宿主机**执行，不是在旧容器里执行。已确认238使用legacy builder，不支持此前命令中的BuildKit日志参数；现改用每条命令的DOCKER_BUILDKIT=0，不安装buildx、不修改Docker全局配置。DEPRECATED提示只是警告，真正的构建错误要单独处理。[Docker旧构建器说明](https://docs.docker.com/reference/cli/docker/image/build/)。
 
-镜像标签不等于已经存在的镜像：先构建core，再构建pool；docker save只导出，docker run才创建容器。最新回传中core已进入Dockerfile，基础镜像、Python3.11与aarch64检查通过，失败在Ubuntu软件源访问；core/pool尚未成功生成。**不要一次性复制本节全部命令；每一步成功后才执行下一步。**
+镜像标签不等于已经存在的镜像：先构建core，再构建pool；docker save只导出，docker run才创建容器。用户已完成本轮构建；已有合格实验镜像/容器时不重复构建。本轮第5/14节源码修订通过挂载生效，不需要重新构建镜像或下载权重。**不要一次性复制本节全部命令；每一步成功后才执行下一步。**
 
 不修改旧yuanwen_sglang_a2、不使用opensora:latest。以下标签若已存在，先核对；已是本实验合格镜像可跳过构建，否则用新标签并同步修改后续引用，不覆盖他人标签。
 
@@ -281,7 +281,9 @@ docker exec -it qwen3-cam-a2-v3 /bin/bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228
 ```
 
-238的source改为238。env.sh初始化CANN/PYTHONPATH/接口/PD store，清除旧OpenSora的RANK等变量。**每个模型/测试终端都source一次；宿主机export不会自动进入docker exec。**
+238的source改为238。env.sh初始化CANN/PYTHONPATH/接口/PD store地址，清除旧OpenSora的RANK等变量。**每个模型/测试终端都source一次；宿主机export不会自动进入docker exec，cd也不能改变Python导入路径。**env.sh只配置PD store地址，不启动该服务；启动见5.2。
+
+当前env.sh会将`SGLANG_HOST_IP`固定为当前机器的配置IP，使MemFabric的session不误选其他网卡；清除大小写HTTP/HTTPS/ALL代理，并设置两机直连的NO_PROXY。推理从本地加载模型，保留offline模式。**下载终端不要source它**；公网代理只在4.5下载会话使用。若要重新下载，应重新传入代理并unset离线变量，不能把推理直连配置误当成下载配置。
 
 ### 4.5 238下载权重，复制给228
 
@@ -374,7 +376,9 @@ AICore=0不代表卡已空闲，检查进程/HBM并与任务所有者确认；�
 
 ## 5 先跑原生PD（不开HiCache/Pool服务）
 
-以下均在新容器内；228/238各先source对应env.sh：
+### 5.1 每个窗口重新初始化、检查源码和NPU接口
+
+以下均在新容器内；新开窗口先在宿主机执行`docker exec -it qwen3-cam-a2-v3 /bin/bash`。进入后228执行`source /ssd_2/yuanwenliu/sglang/experiments/qwen3_cam/env.sh 228`，238把参数改为238。应看到`QWEN_ENV_READY`。**每个P、D、store、Router窗口各自source，不能沿用其他窗口的环境。**源码修订后旧worker不会自动更新，先正常结束自己的旧P/D进程再重启。
 
 ```bash
 python experiments/qwen3_cam/test_cpu.py
@@ -382,32 +386,59 @@ python -c 'import sglang; print(sglang.__file__); assert "/ssd_2/yuanwenliu/sgla
 python experiments/qwen3_cam/preflight.py --config experiments/qwen3_cam/configs/p_228.json --model-path "$MODEL_PATH" --mode off --require-pool --import-model
 ```
 
-238的preflight用configs/d_238.json。要求CPU测试OK、MODEL_IMPORT_OK、DEVICES_OK 8、POOL_API_OK、PREFLIGHT_PASS。此步不加载权重即可发现当前源码与旧kernel API的导入问题；失败停止，不装其他型号wheel。池API通过仍不等于远端存取通过。
+228 D的preflight用configs/d_228.json，238用configs/d_238.json。要求19项CPU测试OK、MODEL_IMPORT_OK、NPU_KVCACHEIO_API_OK、DEVICES_OK 8、POOL_API_OK、PREFLIGHT_PASS。输出中的SGLANG_HOST_IP必须分别为228/238的配置地址。检查只覆盖接口和文件，未加载权重或执行设备传输；池API通过不等于远端存取通过。
 
-三个**独立前台终端**分别启动；每个终端先docker exec和source：
+`Ignore import error ...qwen3_5...fused_sigmoid_mul`是扫描其他模型时跳过其不兼容模块的警告；本实验是Qwen3-30B-A3B，不是Qwen3.5。不要为了消除警告盲目升级kernel。若最终异常指向Qwen3自身或NPU_KVCACHEIO_API_FAILED，停止并回传完整traceback。
+
+### 5.2 228先启动独立PD config store
+
+旧版步骤仅export了ASCEND_MF_STORE_URL，却没有明确创建store。官方TransferEngine示例会调用`create_config_store`，而当前SGLang适配器只调用engine.initialize；因此增加一个明确的前台store，避免初始化时没有配置存储服务。[MemFabric示例](https://github.com/Ascend/memfabric_hybrid/blob/master/examples/transfer/test_transfer_engine.py)、[API](https://github.com/Ascend/memfabric_hybrid/blob/master/doc/pythonAPI.md)。这是**P端必须先排除的部署遗漏**，不代表已经证明是现有native初始化错误的唯一原因。
+
+**228独立store终端**：进入实验容器并source env.sh 228后执行，保留该终端：
+
+```bash
+python -u experiments/qwen3_cam/start_pd_store.py
+```
+
+要求看到`PD_STORE_READY store=tcp://228的配置IP:7100`。此进程只创建配置存储，不加载模型、不分配模型/NPU缓存；保留SDK的TLS默认设置，不继承权重下载的跳过证书校验补丁。7100不是HTTP服务，不用curl访问。不与238上MemCache的5000/6000服务混用。若7100已被占用，脚本报错停止：核对是不是自己的旧store，不自动接管或杀掉任何进程。后续所有P/D重启仍需保留这个store终端。
+
+store启动后，228 P窗口检查：
+
+```bash
+python experiments/qwen3_cam/preflight.py --config experiments/qwen3_cam/configs/p_228.json --model-path "$MODEL_PATH" --mode off --require-pool --import-model --check-pd-store
+```
+
+228 D/238 D各自换成对应config执行同一检查，均应输出`PD_STORE_TCP_OK`和`PREFLIGHT_PASS`。TCP成功只证明配置服务端口可达，不证明DEVICE_RDMA/HCCL正确；失败时先不要加载模型。
+
+### 5.3 启动P4和两端D8，保留日志
+
+三个**独立前台终端**分别启动；每个终端先docker exec和source。脚本固定D的回退备份为`cpu_tensor`，先避免原生PD验收阶段自动建立非目标Host备份池；TP8/EP8、Attention DP2×TP4、DEVICE_RDMA和P→D真实传输不变。D回退用CPU Tensor备份，不是取消KV迁移，也不是启用远端KV Pool。已经修复Tensor兼容性，不应只靠此参数掩盖P端后续HiCache的验证。
 
 **228终端1：P**
 
 ```bash
 export SGLANG_CAM_DETOUR_MODE=off
-bash experiments/qwen3_cam/launch.sh p-228 --context-length 4096 --max-running-requests 4 --chunked-prefill-size 1024
+set -o pipefail
+bash experiments/qwen3_cam/launch.sh p-228 --context-length 4096 --max-running-requests 4 --chunked-prefill-size 1024 2>&1 | tee "experiments/qwen3_cam/results/p-228-startup-$(date +%Y%m%d-%H%M%S).log"
 ```
 
 **228终端2：D主节点**
 
 ```bash
 export SGLANG_CAM_DETOUR_MODE=off
-bash experiments/qwen3_cam/launch.sh d-228 --context-length 4096 --max-running-requests 4
+set -o pipefail
+bash experiments/qwen3_cam/launch.sh d-228 --context-length 4096 --max-running-requests 4 2>&1 | tee "experiments/qwen3_cam/results/d-228-startup-$(date +%Y%m%d-%H%M%S).log"
 ```
 
 **238终端1：D第二节点**
 
 ```bash
 export SGLANG_CAM_DETOUR_MODE=off
-bash experiments/qwen3_cam/launch.sh d-238 --context-length 4096 --max-running-requests 4
+set -o pipefail
+bash experiments/qwen3_cam/launch.sh d-238 --context-length 4096 --max-running-requests 4 2>&1 | tee "experiments/qwen3_cam/results/d-238-startup-$(date +%Y%m%d-%H%M%S).log"
 ```
 
-D两端都启动才完成建组。SGLang自己起模型worker，**不套16进程torchrun**。待权重加载/EP/PD初始化成功，228终端3启动Router：
+D两端都启动才完成建组。SGLang自己起模型worker，**不套16进程torchrun**。检查P/D日志中的`ASCEND_TRANSFER_INIT`地址/物理卡号和`ASCEND_TRANSFER_READY`，待权重加载/EP/PD初始化成功再启动Router；有失败先看14.1，不因看到HTTP错误而重新下载权重。228终端3（同样进入容器并source env.sh 228）启动Router：
 
 ```bash
 python -m sglang_router.launch_router --pd-disaggregation --prefill "http://${HOST_228_IP}:30000" --decode "http://${HOST_228_IP}:30001" --host 0.0.0.0 --port 8000
@@ -421,7 +452,7 @@ curl --fail-with-body http://127.0.0.1:8000/generate -H 'Content-Type: applicati
 
 验收：合理文本、P→D迁移成功；日志/trace确认D EP8=228卡4–7+238卡0–3、Attention两组同机TP4。OOM先排查其他进程/上下文/临时内存，不能悄悄退化EP1或假传输。最终环境已将MemFabric升级到1.1.0，必须在这个环境通过PD，不沿用旧镜像结论。
 
-结束本步：在自己的终端Ctrl+C，先Router、再P/D，确认子进程释放卡。不要pkill python、stop原SGLang容器或停止别人的任务。
+结束本步：在自己的终端Ctrl+C，先Router、再P/D，确认子进程释放卡。PD store不占模型卡，继续后续实验可保留；结束整套实验时最后停止它。不要pkill python、stop原SGLang容器或停止别人的任务。
 
 ## 6 编译CAM并做单机8卡正确性测试
 
@@ -641,6 +672,9 @@ origin应为https://gitcode.com/yuanwenliu/umdk.git。使用GitCode账户及对�
 | apt超时，随后找不到zip/rsync等包 | 先修复源索引访问；按4.3传构建代理与host网络，不通过删除包名绕过问题 |
 | pip或wheel下载失败 | 构建代理是否传入；PyPI/files.pythonhosted.org访问策略、认证及CA；不关闭TLS校验 |
 | 源码导入失败 | 是否用/ssd_2/yuanwenliu/sglang/python、CANN环境、新源码要求的kernel API |
+| Ignore import error ...qwen3_5...fused_sigmoid_mul | 模型扫描警告；检查真正退出的traceback是否来自目标Qwen3，不直接升级kernel |
+| Boolean value of Tensor ... ambiguous | NPU Tensor与Host缓存初始化的兼容性问题，更新本分支修复；不是OOM |
+| Ascend Transfer Engine initialization failed | 第5.2的PD store、明确的session IP，以及新版日志ret/native_error；不盲目退回SDMA |
 | EP/PD/Pool网络失败 | 当前后端DEVICE_RDMA、接口/端口与各NPU网络健康 |
 | CAM等待 | 全部8 owner、10067、comm_id7、物理rank映射/IPC权限 |
 | 有日志无CAM_CALL | MODE/配置及融合是否绕过接入点 |
@@ -653,7 +687,53 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -ip -g; done
 for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 ```
 
-停止仅限自己的实验终端：Router→P/D→sidecar→Meta。切回off前确认旧CAM域退出；不pkill python、不docker prune、不清共享Pool。probe只删除自己的UUID key。未授权时不删除或替换旧容器。
+停止仅限自己的实验终端：Router→P/D→sidecar→Meta→PD store（最后）。切回off前确认旧CAM域退出；不pkill python、不docker prune、不清共享Pool。probe只删除自己的UUID key。未授权时不删除或替换旧容器。
+
+### 14.1 2026-10-13 P/D启动失败：结论、修订和复测
+
+| 日志/现象 | 已确认的原因或边界 | 本轮处理 |
+| --- | --- | --- |
+| 228/238 D：pool_host/mha.py 的Tensor布尔值错误 | NPUMHATokenToKVPool默认用连续的全层Tensor；通用代码误用`buffers or ()` | 对None显式判断，并逐层遍历Tensor或列表，不复制缓存、不改变设备传输算子；覆盖空值、列表、元组、Tensor形式回归测试 |
+| 未显式开启HiCache却进入Host池 | 当前Decode回退策略会自动选host_pool，引发本地Host池构建；不是远端Pool4已经运行 | 原生PD脚本固定cpu_tensor回退备份；P端远端HiCache仍须第7节实测 |
+| P：TransferEngine.initialize返回非零 | 日志仅给通用异常，无法确认具体store/地址/RDMA/驱动原因；旧流程未明确创建PD store | 增加前台PD store、两机TCP预检查、明确SGLANG_HOST_IP、原生ret/native_error日志；尚未证明实机初始化成功 |
+| HTTPConnectionPool | 这份附件未给host/port/URL，不能断定公网下载；也可能是P退出后的服务连接失败或残留代理 | 推理source时清理下载代理；保留完整HTTP行，按目标区分公网与228/238服务 |
+| fused_sigmoid_mul缺失且前缀Ignore import error | qwen3_5在模型扫描时被跳过；不是Qwen3-30B本身的致命异常 | 不升级kernel，不把警告当根因；预检查增加目标NPU KV IO API检查 |
+| 怀疑OOM | 附件这几段没有OutOfMemory异常，也不能证明不存在更早native内存错误 | 不凭这些traceback改变P/D配比、量化或降EP；保留第一条native错误及npu-smi快照 |
+
+**已有NPU适配的位置：**`hardware_backend/npu/memory_pool_npu.py`负责NPU连续KV缓存；`mem_cache/pool_host/mha.py`的NPU分支调用`sgl_kernel_npu.kvcacheio.transfer_kv_dim_exchange`；`disaggregation/ascend/conn.py`和`transfer_engine.py`接入MemFabric的PD传输。不是没有NPU实现，而是新通用Host缓存逻辑与NPU表示之间出现回归，加上部署/诊断步骤不完整。这次保留NPU路径，不用CUDA算子替代，不承诺整个新源码与旧kernel完全兼容。
+
+**已有容器的恢复步骤：**
+
+1. 在开发服务器按13节push本次SGLang分支；本轮不需要重新push UMDK。
+2. 正常结束自己的旧P/D和Router，避免旧worker继续使用旧源码。不要停他人的任务。
+3. 228、238宿主机各执行下面更新，确认HEAD相同。GitHub访问仍按获准方式设置宿主代理；有本地改动就停下，不reset、不清理。容器挂载该源码目录，所以无需重建Docker、重装kernel或重新下载权重。
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git status --short --branch
+git remote get-url origin
+git switch feat/qwen3-cam-detour-conflict
+git pull --ff-only origin feat/qwen3-cam-detour-conflict
+git rev-parse HEAD
+```
+
+4. 每个新实验终端从宿主机docker exec进入，再source对应机器的env.sh；重新运行5.1预检查。228、238都应通过，不能仅看CPU测试OK。
+5. 按5.2先启动228的PD store并保持前台，三处preflight加`--check-pd-store`。7100监听由自己的store提供；如果现有服务占用，先核对归属，不能kill或偷偷换端口。
+6. 按5.3重新启动P、两端D，使用带tee的命令保留日志；待P/D都就绪再启动Router。成功后再进入CAM/Pool，不跳过原生PD。
+
+**P仍失败时的最小取证：**每个P/D容器终端source后将MF日志级别设为0再按5.3重启；不要反复并行启动新worker。该变量是本分支的适配开关，调用SDK的`set_log_level(0)`，不是假定存在某个官方环境变量：
+
+```bash
+export SGLANG_ASCEND_MF_LOG_LEVEL=0
+```
+
+保存日志中第一次`ASCEND_TRANSFER_INIT`到第一条失败（含`ret`和`native_error`）前后的原生日志，不只贴最后Scheduler traceback。若报错在DEVICE_RDMA的前置all_gather，取证HCCL建组错误；若已进入engine.initialize，依据native错误排查store连接、session地址、NPU RDMA初始化和库版本。get_last_err_msg只是辅助信息，native完整日志仍是依据。两台宿主机补充`npu-smi info`，以及第14节hccn_tool的IP/健康查询；无需全量listen清单。不要把PD store的TCP成功当作RoCE网络验证。
+
+**本地权重与HTTP排查：**日志应显示本地model_path与offline配置；env.sh禁止推理使用下载代理。`huggingface.co/modelscope.cn`属于公网模型查询，需排查哪个组件触发；`228:8998`属于PD bootstrap，`228:30000/30001/8000`属于推理/Router接口。首次HTTP请求发生在哪个进程、到哪里、是否在另一进程失败后出现，决定它是根因还是后续症状；远端权重已准备好，不因此重新下载。PD store的7100使用TCP协议，不归入HTTP接口。
+
+**验证边界：**19项CPU/模拟回归测试和命令语法检查通过，仅验证Tensor表示处理、环境设置、参数构造和错误信息传递；没有在228/238实际执行NPU Host缓存搬运、启动RDMA引擎或验证推理质量。D实际启动、P/D迁移以及第7节远端Pool都仍需实机验收。
+
+**Tensor修复的专项实机复测：**cpu_tensor基线不会覆盖原先触发错误的D host_pool分支。原生PD通过后，可正常结束自己的Router和两端D，再在228/238的D启动命令末尾分别追加`--disaggregation-decode-retraction-backup host_pool`，重启两端D并检查Host池初始化；需要支持回退机制时再验证真实备份/恢复。这项复测应单独记录，不与cpu_tensor基线混用。第7节P的HiCache还必须通过真实远端put/get和恢复，不能用一次启动成功替代搬运正确性测试。初次只排查启动时，先保持cpu_tensor基线。
 
 ## 15 依据与验证边界
 
@@ -662,4 +742,4 @@ for i in 0 1 2 3 4 5 6 7; do hccn_tool -i "$i" -net_health -g; done
 - [SGLang Qwen3](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/models/qwen3_moe.py)、[PD](https://github.com/sgl-project/sglang/blob/f620d73/docs/docs/advanced_features/pd_disaggregation.mdx)、[NPU MemCache](https://github.com/sgl-project/sglang/blob/f620d73/python/sglang/srt/mem_cache/storage/npu_memcache/README.md)及本仓库NPU pyproject。
 - [MemCache API版本说明](https://raw.githubusercontent.com/Ascend/memcache/master/doc/install_whl.md)、[1.1.0包元数据](https://pypi.org/pypi/memcache-hybrid/1.1.0/json)、[MemFabric1.1.0元数据](https://pypi.org/pypi/memfabric-hybrid/1.1.0/json)；wheel和SHA256见docker/requirements-pool.txt。
 
-本次通过14项CPU测试、50段Bash命令及Python/shell语法检查；文档检查包含legacy构建、两次构建的六个代理参数、host网络、下载会话代理与镜像存在性前置条件。测试覆盖个人路径、228/238启动角色、ascend/八卡/IPC参数及挂载范围；这些不等于目标实机验收。未实际验证238的代理可达性，本次未在228/238创建容器，也未构建或运行A2模型。
+本轮通过19项CPU/模拟回归测试和Python/shell语法检查；覆盖个人路径、228/238启动角色、代理清理与明确的session IP、ascend/八卡/IPC参数、NPU Tensor/list缓冲区遍历、PD store封装及原生初始化错误保留。这些不等于目标实机验收；测试中store和TransferEngine为模拟对象。镜像构建、权重准备及部分预检查由用户在A2执行并反馈；助手没有直接连接228/238、分配NPU或完成模型运行。

@@ -11,6 +11,7 @@ from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import
 from sglang.srt.utils.network import NetworkAddress
 
 try:
+    import memfabric_hybrid
     from memfabric_hybrid import TransferEngine
 
     import_error = None
@@ -60,6 +61,18 @@ class AscendTransferEngine(MooncakeTransferEngine):
         from sglang.srt.runtime_context import get_parallel
 
         transfer_protocol = self._get_transfer_protocol()
+        log_level = os.getenv("SGLANG_ASCEND_MF_LOG_LEVEL")
+        if log_level is not None:
+            level = int(log_level)
+            if level not in (0, 1, 2, 3):
+                raise ValueError("SGLANG_ASCEND_MF_LOG_LEVEL must be 0..3")
+            set_log_level = getattr(memfabric_hybrid, "set_log_level", None)
+            if set_log_level is not None:
+                set_log_level(level)
+        logger.info(
+            "ASCEND_TRANSFER_INIT store=%s session=%s role=%s npu_id=%s protocol=%s",
+            self.store_url, self.session_id, self.role, self.npu_id, transfer_protocol,
+        )
         if transfer_protocol == "device_rdma":
             # with device RDMA for PD transfer: initialize hccl in advance
             # through all_gather to avoid conflicts with rdma initialization.
@@ -80,8 +93,21 @@ class AscendTransferEngine(MooncakeTransferEngine):
             self.store_url, self.session_id, self.role, self.npu_id, trans_op_type
         )
         if ret_value != 0:
-            logger.error("Ascend Transfer Engine initialization failed.")
-            raise RuntimeError("Ascend Transfer Engine initialization failed.")
+            detail = "unavailable"
+            get_error = getattr(memfabric_hybrid, "get_last_err_msg", None)
+            if get_error is not None:
+                try:
+                    detail = get_error()
+                except Exception as exc:
+                    detail = f"get_last_err_msg failed: {type(exc).__name__}"
+            message = (
+                f"Ascend Transfer Engine initialization failed: ret={ret_value}, "
+                f"store={self.store_url}, session={self.session_id}, role={self.role}, "
+                f"npu_id={self.npu_id}, protocol={transfer_protocol}, native_error={detail}"
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+        logger.info("ASCEND_TRANSFER_READY role=%s npu_id=%s", self.role, self.npu_id)
 
     def batch_register(self, ptrs: List[int], lengths: List[int]):
         try:

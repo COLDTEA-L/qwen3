@@ -5,7 +5,9 @@ import importlib
 import importlib.metadata
 import json
 import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def main():
@@ -15,6 +17,7 @@ def main():
     parser.add_argument("--mode", choices=["off", "hccl-a2a", "cam-detour"], default="cam-detour")
     parser.add_argument("--require-pool", action="store_true")
     parser.add_argument("--import-model", action="store_true", help="Import model code without loading weights")
+    parser.add_argument("--check-pd-store", action="store_true", help="Require an already-running PD config store; TCP connectivity only")
     args = parser.parse_args()
     from sglang.srt.distributed.device_communicators.cam_detour import CamConfig
     config = CamConfig.from_dict(json.loads(Path(args.config).read_text()))
@@ -44,6 +47,34 @@ def main():
         except Exception as exc:
             failed.append("model_import")
             print("MODEL_IMPORT_FAILED", type(exc).__name__, str(exc))
+        try:
+            io = importlib.import_module("sgl_kernel_npu.kvcacheio")
+            for name in ("TransferDirection", "transfer_kv_dim_exchange"):
+                if not hasattr(io, name):
+                    raise RuntimeError(f"Missing NPU HiCache API {name}")
+            print("NPU_KVCACHEIO_API_OK (not a device transfer test)")
+        except Exception as exc:
+            failed.append("npu_kvcacheio")
+            print("NPU_KVCACHEIO_API_FAILED", type(exc).__name__, str(exc))
+    print("INFERENCE_NETWORK", {key: os.getenv(key) for key in (
+        "SGLANG_HOST_IP", "HCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME",
+        "ASCEND_MF_STORE_URL", "ASCEND_MF_TRANSFER_PROTOCOL")})
+    proxy_names = [key for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy") if os.getenv(key)]
+    if proxy_names:
+        failed.append("inference_proxy")
+        print("INFERENCE_PROXY_PRESENT", proxy_names, "(values omitted; source current env.sh)")
+    if args.check_pd_store:
+        try:
+            parsed = urlparse(os.environ["ASCEND_MF_STORE_URL"])
+            if parsed.scheme != "tcp" or not parsed.hostname or not parsed.port:
+                raise ValueError("Require tcp://host:port for this experiment")
+            with socket.create_connection((parsed.hostname, parsed.port), timeout=5):
+                pass
+            print("PD_STORE_TCP_OK (not an RDMA/engine correctness test)")
+        except Exception as exc:
+            failed.append("pd_store")
+            print("PD_STORE_TCP_FAILED", type(exc).__name__, str(exc))
     if args.require_pool:
         try:
             from memcache_hybrid import DistributedObjectStore, LocalConfig, MetaConfig, MetaService

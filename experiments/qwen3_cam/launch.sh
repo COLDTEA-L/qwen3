@@ -38,6 +38,7 @@ case "$role" in
     args=(--tp-size 8 --ep-size 8 --attn-dp-size 2 --nnodes 2 --node-rank "$rank"
           --base-gpu-id "$base" --dist-init-addr "${HOST_228_IP}:29500" --port 30001
           --disaggregation-mode decode --disaggregation-bootstrap-port 8998
+          --disaggregation-decode-retraction-backup cpu_tensor
           --max-running-requests 64)
     ;;
   *) echo "Unknown role $role" >&2; exit 2 ;;

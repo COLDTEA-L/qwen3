@@ -1,5 +1,6 @@
 """Dependency-free host tests. These do NOT validate Ascend device kernels."""
 
+import ast
 import importlib.util
 import json
 import os
@@ -8,6 +9,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch, MagicMock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("cam_adapter_test", ROOT / "python/sglang/srt/distributed/device_communicators/cam_detour.py")
@@ -26,6 +29,89 @@ spec4.loader.exec_module(runtime_config)
 
 
 class CamTests(unittest.TestCase):
+    def test_inference_env_uses_role_ip_and_removes_download_proxy(self):
+        source = Path(__file__).with_name("env.sh").read_text()
+        # Execute the actual environment block, omitting CANN sourcing and
+        # directory creation. No real proxy credentials enter test output.
+        block = source[source.index("unset RANK"):source.index("mkdir -p")]
+        render = block + '\nprintf "%s\\0" "$SGLANG_HOST_IP" "$HCCL_SOCKET_IFNAME" "${HTTP_PROXY-unset}" "${all_proxy-unset}" "$NO_PROXY" "$ASCEND_MF_TRANSFER_PROTOCOL"'
+        environment = {**os.environ, "HOST_228_IP": "192.0.2.228", "HOST_238_IP": "192.0.2.238",
+            "HOST_IF_228": "nic228", "HOST_IF_238": "nic238", "_qwen_exp_dir": "/mock/experiments/qwen3_cam",
+            "HTTP_PROXY": "mock-proxy", "all_proxy": "mock-proxy"}
+        for role in ("228", "238"):
+            result = subprocess.run(["bash", "-c", render], env={**environment, "_qwen_role": role}, check=True, capture_output=True)
+            values = result.stdout.decode().rstrip("\0").split("\0")
+            self.assertEqual(values[:4], ["192.0.2." + role, "nic" + role, "unset", "unset"])
+            self.assertIn("192.0.2.228", values[4])
+            self.assertIn("192.0.2.238", values[4])
+            self.assertEqual(values[5], "device_rdma")
+
+    def device_buffer_expression(self):
+        # Execute the production initializer's generator without importing the
+        # full Torch/NPU stack. A real device run remains required on A2.
+        source = ROOT / "python/sglang/srt/mem_cache/pool_host/mha.py"
+        tree = ast.parse(source.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MHATokenToKVPoolHost")
+        init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        call = next(n for n in ast.walk(init) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute) and n.func.attr == "_init_device_row_stride")
+        return compile(ast.Expression(call.args[0]), str(source), "eval")
+
+    def test_npu_tensor_buffers_do_not_use_truthiness(self):
+        class TensorLike:
+            def __init__(self, layers):
+                self.layers = layers
+            def __bool__(self):
+                raise RuntimeError("Boolean value of Tensor is ambiguous")
+            def __iter__(self):
+                return iter(self.layers)
+        k, v = [object(), object()], [object(), object()]
+        main = SimpleNamespace(k_buffer=TensorLike(k), v_buffer=TensorLike(v))
+        draft = SimpleNamespace(k_buffer=(k[0],), v_buffer=[v[0]])
+        owner = SimpleNamespace(device_pool=main, mtp_draft_device_pools=(None, draft))
+        result = list(eval(self.device_buffer_expression(), {"self": owner}))
+        self.assertEqual(result, k + v + [k[0], v[0]])
+
+    def test_device_buffers_none_empty_list_and_tuple(self):
+        pools = (SimpleNamespace(k_buffer=None, v_buffer=[]), SimpleNamespace(k_buffer=(), v_buffer=None))
+        owner = SimpleNamespace(device_pool=pools[0], mtp_draft_device_pools=pools[1:])
+        self.assertEqual(list(eval(self.device_buffer_expression(), {"self": owner})), [])
+
+    def test_transfer_engine_failure_preserves_native_context(self):
+        source = ROOT / "python/sglang/srt/disaggregation/ascend/transfer_engine.py"
+        tree = ast.parse(source.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendTransferEngine")
+        function = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "initialize")
+        globals_ = {"os": os, "logger": MagicMock(),
+                    "memfabric_hybrid": SimpleNamespace(get_last_err_msg=lambda: "mock RDMA error")}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), globals_)
+        engine = SimpleNamespace(initialize=lambda *args: 17)
+        owner = SimpleNamespace(engine=engine, store_url="tcp://192.0.2.228:7100",
+            session_id="192.0.2.228:1234", role="Prefill", npu_id=1,
+            _get_transfer_protocol=lambda: "sdma", _resolve_trans_op_type=lambda p: p)
+        context = SimpleNamespace(get_parallel=lambda: None)
+        with patch.dict(sys.modules, {"sglang.srt.runtime_context": context}), patch.dict(os.environ, {"SGLANG_ASCEND_MF_LOG_LEVEL": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "ret=17.*native_error=mock RDMA error"):
+                globals_["initialize"](owner)
+            engine.initialize = lambda *args: 0
+            globals_["initialize"](owner)
+
+    def test_pd_store_wrapper_success_failure_and_url(self):
+        spec = importlib.util.spec_from_file_location("pd_store_test", Path(__file__).with_name("start_pd_store.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.store_address("tcp://192.0.2.228:7100"), ("192.0.2.228", 7100))
+        for url in ("https://192.0.2.228:7100", "tcp://user:pass@192.0.2.228:7100", "tcp://192.0.2.228:7100/path"):
+            with self.assertRaises(ValueError):
+                module.store_address(url)
+        mf = SimpleNamespace(create_config_store=MagicMock(return_value=0), set_log_level=MagicMock(), get_last_err_msg=lambda: "mock store error")
+        with patch.object(module.socket, "socket", return_value=MagicMock()), patch.object(module.socket, "create_connection", return_value=MagicMock()):
+            module.start_store("tcp://192.0.2.228:7100", mf)
+            mf.create_config_store.assert_called_once()
+            mf.create_config_store.return_value = 9
+            with self.assertRaisesRegex(RuntimeError, "ret=9.*mock store error"):
+                module.start_store("tcp://192.0.2.228:7100", mf)
+
     def container_arguments(self, firmware):
         helper = Path(__file__).parent / "docker/create_container.sh"
         program = 'source "$1"; build_container_command image:test test-container /usr/local/bin/npu-smi "$2"; printf "%s\\0" "${container_command[@]}"'
@@ -120,6 +206,7 @@ class CamTests(unittest.TestCase):
             if role.startswith("d-"):
                 self.assertEqual(args[args.index("--dist-init-addr")+1], "192.0.2.228:29500")
                 self.assertEqual(args[args.index("--attn-dp-size")+1], "2")
+                self.assertEqual(args[args.index("--disaggregation-decode-retraction-backup")+1], "cpu_tensor")
 
     def test_role_mappings(self):
         for filename, ranks, expected in (

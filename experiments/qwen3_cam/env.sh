@@ -27,14 +27,25 @@ done
 unset RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT CAM_COMM_ID
 unset ASCEND_RT_VISIBLE_DEVICES
 export PYTHONPATH="$_qwen_exp_dir/../../python${PYTHONPATH:+:$PYTHONPATH}"
-if [ "$_qwen_role" = 228 ]; then export HCCL_SOCKET_IFNAME="$HOST_IF_228"; else export HCCL_SOCKET_IFNAME="$HOST_IF_238"; fi
+if [ "$_qwen_role" = 228 ]; then
+  export HCCL_SOCKET_IFNAME="$HOST_IF_228" SGLANG_HOST_IP="$HOST_228_IP"
+else
+  export HCCL_SOCKET_IFNAME="$HOST_IF_238" SGLANG_HOST_IP="$HOST_238_IP"
+fi
 export GLOO_SOCKET_IFNAME="$HCCL_SOCKET_IFNAME"
+# Inference uses direct cluster connections, not the download proxy or a
+# default-route-derived address on a different NIC. Do not source for downloads.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+export NO_PROXY="localhost,127.0.0.1,::1,${HOST_228_IP},${HOST_238_IP}"
+export no_proxy="$NO_PROXY"
+export QWEN_EXPERIMENT_HOST_ROLE="$_qwen_role"
 export ASCEND_MF_STORE_URL="tcp://${HOST_228_IP}:7100"
 export ASCEND_MF_TRANSFER_PROTOCOL=device_rdma
 export SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=0
 export SOC_VERSION=ascend910b4
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SGLANG_CAM_DETOUR_MODE="${SGLANG_CAM_DETOUR_MODE:-off}"
+export SGLANG_ASCEND_MF_LOG_LEVEL="${SGLANG_ASCEND_MF_LOG_LEVEL:-1}"
 mkdir -p "$_qwen_exp_dir/results" "$_qwen_exp_dir/profiles"
 cd "$_qwen_exp_dir/../.." || return
 echo "QWEN_ENV_READY host=$_qwen_role cann=$_qwen_cann"
