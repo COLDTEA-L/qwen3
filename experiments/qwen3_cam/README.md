@@ -170,6 +170,8 @@ source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm/env.sh 238
 
 不要在容器内再次执行docker exec，不要source旧qwen3_cam/env.sh。新env配置CANN/NNAL、指定主机IP/网卡、A2 RoCE、离线模式，清理下载代理和旧SGLang路径/PD配置。**模型不联网；PD控制/数据通信仍必须联机。**
 
+官方A2 Direct传输要求的`HCCL_INTRA_ROCE_ENABLE=1`允许机内RoCE路径；不能因为硬件有HCCS FullMesh，就假定这轮所有机内通信仍走HCCS。最终冲突实验需要验证每类流量的实际路径，并统一各对照组的该配置，避免把选路变化当成拥塞或优化收益。
+
 ## 5 预检查与NPU跨机搬运关口
 
 每机新容器内执行：
