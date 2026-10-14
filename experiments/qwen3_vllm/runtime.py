@@ -56,7 +56,7 @@ def connector(role, layout, pool=False):
 
 
 def build_command(role, layout="pd4", pool=False, model=None,
-                  max_len=2048, max_seqs=4, memory=0.75):
+                  max_len=2048, max_seqs=4, memory=0.75, moe_comm="native"):
     if role not in ROLES or layout not in ("pd4", "pd8"):
         raise ValueError("Unknown role/layout")
     if role == "solo-228" and layout != "pd4":
@@ -66,6 +66,8 @@ def build_command(role, layout="pd4", pool=False, model=None,
             raise ValueError("d-238 uses pd4; d8-228/d8-238 use pd8")
     if max_len < 128 or max_seqs < 1 or not 0 < memory < 1:
         raise ValueError("Invalid token/concurrency/memory budget")
+    if moe_comm not in ("native", "alltoall"):
+        raise ValueError("MoE mode must be native or alltoall")
     if pool and role == "solo-228":
         raise ValueError("Pool qualification requires a PD role")
     model = model or f"{ROOT}/models/Qwen3-30B-A3B"
@@ -77,6 +79,7 @@ def build_command(role, layout="pd4", pool=False, model=None,
     env = {
         "ASCEND_RT_VISIBLE_DEVICES": devices,
         "VLLM_HOST_IP": HOSTS[host], "HCCL_IF_IP": HOSTS[host],
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     }
     cmd = [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model,
            "--served-model-name", "qwen3", "--host", "0.0.0.0", "--port", str(http_port),
@@ -87,7 +90,11 @@ def build_command(role, layout="pd4", pool=False, model=None,
            "--seed", "1024", "--block-size", "128",
            "--additional-config", json.dumps({"enable_flashcomm1": False,
                "enable_matmul_allreduce": False, "enable_fused_mc2": 0,
-               "enable_cpu_binding": False}, separators=(",", ":"))]
+               "enable_cpu_binding": False, "multistream_overlap_gate": False,
+               "multistream_overlap_shared_expert": False, "enable_shared_expert_dp": False,
+               "enable_flashcomm2_parallel_size": 0, "qwen_moe_comm": moe_comm}, separators=(",", ":"))]
+    if moe_comm == "alltoall":
+        cmd += ["--worker-cls", "qwen_moe_adapter.worker.QwenAllToAllWorker"]
     # External DP load balancing exposes one API endpoint per host. EP spans DP*TP.
     if role.startswith("d8-"):
         cmd += ["--data-parallel-size", "2", "--data-parallel-size-local", "1",
@@ -139,6 +146,8 @@ def main():
     p.add_argument("--max-num-seqs", type=int, default=4)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.75)
     p.add_argument("--profile-dir", type=Path, help="Optional absolute NPU profiler output directory")
+    p.add_argument("--moe-comm", choices=("native", "alltoall"), default="native",
+                   help="native is the control; alltoall is an opt-in A2 experiment, not CAM")
     args = p.parse_args()
     if args.action == "configure":
         if args.dry_run:
@@ -153,7 +162,7 @@ def main():
             p.error("serve requires --role")
         try:
             cmd, env = build_command(args.role, args.layout, args.pool_dram_qualification,
-                os.getenv("MODEL_PATH"), args.max_model_len, args.max_num_seqs, args.gpu_memory_utilization)
+                os.getenv("MODEL_PATH"), args.max_model_len, args.max_num_seqs, args.gpu_memory_utilization, args.moe_comm)
         except ValueError as exc:
             p.error(str(exc))
         if args.profile_dir:
@@ -184,6 +193,12 @@ def main():
         p.error(f"Source qwen3_vllm/env.sh {expected_host} in the new vLLM container")
     if args.action == "serve" and os.getenv("QWEN_CAM_MODE", "off") != "off":
         p.error("CAM is not ported to this baseline; only QWEN_CAM_MODE=off is supported")
+    if args.action == "serve" and args.moe_comm == "alltoall":
+        try:
+            from qwen_moe_adapter.policy import check_installation
+            check_installation()
+        except (ImportError, RuntimeError) as exc:
+            p.error(f"MoE adapter qualification failed: {exc}")
     if args.pool_dram_qualification:
         cfg = HERE / "runtime-config/mooncake-dram-qualification.json"
         if not cfg.is_file():

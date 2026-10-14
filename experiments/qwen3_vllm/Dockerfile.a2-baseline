@@ -3,6 +3,8 @@ ARG A2_BASE_IMAGE=quay.io/ascend/vllm-ascend@sha256:638fc04eaa3654fcf14688096ed4
 FROM ${A2_BASE_IMAGE}
 USER root
 COPY runtime.py verify.py /opt/qwen3-vllm/
-RUN python /opt/qwen3-vllm/verify.py --image-only
+COPY moe_adapter /opt/qwen3-vllm/moe_adapter/
+RUN python -m pip install --no-deps --no-build-isolation --no-index /opt/qwen3-vllm/moe_adapter
+RUN python /opt/qwen3-vllm/verify.py --image-only --moe-adapter
 WORKDIR /ssd_2/yuanwenliu/sglang
 CMD ["/bin/bash"]

@@ -1,22 +1,23 @@
-# Qwen3 A2 实验指导：vLLM-Ascend + Mooncake 原生基线
+# Qwen3 A2 实验指导：vLLM-Ascend + Mooncake 基线与 MoE All-to-All 接入
 
 更新：2026-10-14。机器均以 **228 / 238** 指代，个人目录均为 `/ssd_2/yuanwenliu`。本文替代旧的默认执行步骤；[SGLang 历史指导](README.sglang-legacy.md)保留作回退与取证，不与新环境混用。
 
 ## 0 本次迁移的范围和两个重要限制
 
-本轮提供：固定镜像/版本检查、新容器创建、离线模型启动、无权重的 NPU 跨机读测试、P4+D4 基线、P4+D8 基线、OpenAI 负载与指标采集，以及小容量共享池接口验证。**没有改写模型、没有把 CAM 偷换成 HCCL、没有声称原三类流量实验已全部迁移。**
+本轮提供：固定镜像/版本检查、新容器创建、离线模型启动、无权重的 NPU 跨机读测试、P4+D4 基线、P4+D8 基线、OpenAI 负载与指标采集、小容量共享池接口验证，以及**显式启用的 MoE All-to-All worker适配包**。没有改写权重、没有把CAM偷换成HCCL、没有声称原三类流量实验已全部迁移。新增All-to-All仍须按8.1节在A2实测。
 
 直接核对固定源码后发现：
 
 1. **A2 的 EP4/EP8 默认 MoE 通信是 AllGather，不是 Dispatch/Combine All-to-All。** `vllm_ascend/ascend_forward_context.py` 的 A2 分支仅在 EP>=16、每卡专家数<=24、token 数满足容量限制时选择 MC2；否则为 AllGather。因此 D8 的 EP8 可以表示专家分片，但不能据此宣称获得原计划的 All-to-All 流量。
 2. **Mooncake v0.3.9 的 A2 普通共享池是 Host DRAM，不是四卡 HBM Pool。** `mooncake-store/src/utils.cpp` 的普通 Ascend 分配分支调用 `aclrtMallocHost`；Fabric Memory 的另一路径在官方指导中针对 A3，不能给 A2 开个环境变量就等同实现。本文的小池只验证接口/复用流程，明确标记 DRAM qualification。
 
-这两点修正此前“迁移可能更简单”的评估：**原生服务/PD可以作为候选基线，但严格的 MoE All-to-All + CAM + 独立 HBM Pool 不会因换引擎而自动实现。** 若这两项必须保持原语义，后续必须单独适配并实机验证，或修复原 SGLang 路线；不能用此基线替代最终实验。
+这两点修正此前“迁移可能更简单”的评估：原生服务/PD可以作为候选基线，但严格的 MoE All-to-All + CAM + 独立 HBM Pool 不会因换引擎而自动实现。本次先补MoE All-to-All接入和验收步骤；CAM与独立HBM Pool仍未迁移，不能用此基线替代最终实验。
 
 | 阶段 | 本轮提供 | 验收边界 |
 | --- | --- | --- |
 | 环境/模型/跨机读 | 检查与启动脚本 | 仍由228/238实测；预检查不是运行成功 |
 | P4+D4、P4+D8 | 原生PD启动与官方proxy接入 | D8是Attention TP4、DP2、EP8；实际通信后端须看profile |
+| MoE All-to-All | 独立worker适配包、EP4/8无权重路由测试、输出对照 | 默认native不变；alltoall显式启用；尚无A2实测结果 |
 | 共享池 | 原生MultiConnector小容量DRAM验证 | 不是独立Pool4、不是远端HBM恢复已完成 |
 | CAM多路径 | 保留UMDK及旧接入代码，整理移植验收要求 | 新vLLM入口拒绝CAM模式，尚未接入 |
 | 三流冲突/控制器 | 给出测量方法 | 未证明存在冲突，未实现统一控制器 |
@@ -101,12 +102,12 @@ docker tag quay.io/ascend/vllm-ascend@sha256:638fc04eaa3654fcf14688096ed4e9d88ea
 docker image inspect qwen3-vllm:a2-base-pinned --format '{{.Id}} {{.Architecture}} {{json .RepoDigests}}'
 ```
 
-Architecture必须为arm64。新Dockerfile只增加版本检查工具，**不运行apt、不安装/升级pip包**；沿用旧Docker支持的builder，不使用`--progress`：
+Architecture必须为arm64。新Dockerfile增加版本检查工具和本仓库的纯Python MoE适配包，以`--no-deps --no-build-isolation --no-index`离线安装；不运行apt、不升级Torch/Transformers等依赖。沿用旧Docker支持的builder，不使用`--progress`。本次用v2新tag，不覆盖此前v1镜像：
 
 ```bash
 cd /ssd_2/yuanwenliu/sglang
-DOCKER_BUILDKIT=0 docker build --network=none -f experiments/qwen3_vllm/Dockerfile.a2-baseline --build-arg A2_BASE_IMAGE=qwen3-vllm:a2-base-pinned -t qwen3-vllm:a2-native-v1 experiments/qwen3_vllm
-docker image inspect qwen3-vllm:a2-native-v1 --format '{{.Id}} {{.Architecture}}'
+DOCKER_BUILDKIT=0 docker build --network=none -f experiments/qwen3_vllm/Dockerfile.a2-baseline --build-arg A2_BASE_IMAGE=qwen3-vllm:a2-base-pinned -t qwen3-vllm:a2-native-v2 experiments/qwen3_vllm
+docker image inspect qwen3-vllm:a2-native-v2 --format '{{.Id}} {{.Architecture}}'
 ```
 
 先得到Successfully built/tagged，才保存；失败时不要继续运行不存在的镜像。构建只查元数据/来源，不加载模型或NPU。出现QUALIFICATION_FAILED就保存检查结果，不自动把不匹配包升级成最新版。
@@ -114,20 +115,22 @@ docker image inspect qwen3-vllm:a2-native-v1 --format '{{.Id}} {{.Architecture}}
 238保存镜像，使用scp传给228，不需要rsync：
 
 ```bash
-docker save -o /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v1.tar qwen3-vllm:a2-native-v1
-sha256sum /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v1.tar
-scp /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v1.tar yuanwenliu@10.155.205.228:/ssd_2/yuanwenliu/
+docker save -o /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v2.tar qwen3-vllm:a2-native-v2
+sha256sum /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v2.tar
+scp /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v2.tar yuanwenliu@10.155.205.228:/ssd_2/yuanwenliu/
 ```
 
 228核对同一tar校验和并导入：
 
 ```bash
-sha256sum /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v1.tar
-docker load -i /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v1.tar
-docker image inspect qwen3-vllm:a2-native-v1 --format '{{.Id}} {{.Architecture}}'
+sha256sum /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v2.tar
+docker load -i /ssd_2/yuanwenliu/qwen3-vllm-a2-native-v2.tar
+docker image inspect qwen3-vllm:a2-native-v2 --format '{{.Id}} {{.Architecture}}'
 ```
 
 两机最终ImageID应一致。镜像tar暂留作为证据，不自动删除。
+
+若已建好此前的v1镜像/容器且原生预检查已通过，可以按8.1.1节在**新vLLM实验容器**中离线安装适配包，跳过重复拉镜像。不要把包安装到旧SGLang容器。首次部署按本节v2流程。
 
 ## 4 新建容器与进入方式（两机宿主机）
 
@@ -143,9 +146,9 @@ ls -l /etc/hccn.conf /etc/ascend_install.info
 
 ```bash
 cd /ssd_2/yuanwenliu/sglang
-bash experiments/qwen3_vllm/create_container.sh qwen3-vllm:a2-native-v1 qwen3-vllm-a2-v1 --print-only
-bash experiments/qwen3_vllm/create_container.sh qwen3-vllm:a2-native-v1 qwen3-vllm-a2-v1
-docker ps --filter name=qwen3-vllm-a2-v1
+bash experiments/qwen3_vllm/create_container.sh qwen3-vllm:a2-native-v2 qwen3-vllm-a2-v2 --print-only
+bash experiments/qwen3_vllm/create_container.sh qwen3-vllm:a2-native-v2 qwen3-vllm-a2-v2
+docker ps --filter name=qwen3-vllm-a2-v2
 ```
 
 脚本沿用已知可用的ascend runtime、host网络、host IPC、八卡设备与驱动/DCMI挂载，新增`/etc/hccn.conf`和固定proxy源码；权重只读。不挂整棵`/var`、`/home`。privileged是实验配置，不是生产隔离建议。容器名已存在时拒绝覆盖。
@@ -153,7 +156,7 @@ docker ps --filter name=qwen3-vllm-a2-v1
 **每个新终端先在宿主机进入容器：**
 
 ```bash
-docker exec -it qwen3-vllm-a2-v1 bash
+docker exec -it qwen3-vllm-a2-v2 bash
 ```
 
 然后228容器内：
@@ -177,7 +180,7 @@ source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm/env.sh 238
 每机新容器内执行：
 
 ```bash
-python experiments/qwen3_vllm/verify.py --device --model --source
+python experiments/qwen3_vllm/verify.py --device --model --source --moe-adapter
 ```
 
 需QUALIFICATION_PASS。它只证明包、API、来源、设备可见、文件存在，不代表推理或搬运正确。若Mooncake源码来源无法核对、版本不符、NNAL缺失或权重缺失，停止。已有权重不重下；仅在确实缺失时参考历史指导4.5的独立下载环境，不在推理镜像里升级Transformers。
@@ -311,7 +314,7 @@ python -u experiments/qwen3_vllm/runtime.py serve --role d8-228 --layout pd8
 python -u experiments/qwen3_vllm/runtime.py serve --role d8-238 --layout pd8
 ```
 
-两端D同时启动才形成全局组。这里不是两个独立EP4 D服务：DP rank0/1共同参与D的专家并行组，Attention各在本机TP4内；proxy向两个HTTP端点做外部负载均衡。实际EP8和跨机MoE流量必须由运行配置/profile验证；该版本A2仍默认AllGather。
+两端D同时启动才形成全局组。这里不是两个独立EP4 D服务：DP rank0/1共同参与D的专家并行组，Attention各在本机TP4内；proxy向两个HTTP端点做外部负载均衡。实际EP8和跨机MoE流量必须由运行配置/profile验证；以上不加开关的命令仍为native/AllGather对照。新增All-to-All按下一节启用。
 
 三端就绪后，228另开容器窗口：
 
@@ -320,6 +323,103 @@ python -u experiments/qwen3_vllm/runtime.py proxy --layout pd8
 ```
 
 重复第7节短请求和低负载测试。三处启动均可用tee另存日志；结果目录和profile须按轮次区分，不覆盖。
+
+## 8.1 新增：MoE Dispatch/Combine All-to-All 接入与验收
+
+### 8.1.1 接入方式和环境检查
+
+入口是`runtime.py serve --moe-comm alltoall`，它设置显式worker类`qwen_moe_adapter.worker.QwenAllToAllWorker`。worker在加载模型前装配固定版本的选择策略，实际使用上游`AlltoAllCommImpl → TokenDispatcherWithAll2AllV → HCCL all_to_all_single`。**不是CAM，不改KV后端，不改框架源码文件，也不注册默认自动加载的插件。** 不加开关或`--moe-comm native`均保留原生选择策略。
+
+当前支持范围：原始128专家/top8的Qwen3-30B-A3B，BF16无量化、Attention TP4、DP1/DP2（EP4/EP8）、专家内部TP1、eager/V1 runner；不支持EPLB、图捕获、FlashComm、DBO、投机解码和多流重叠。适配补齐token数至TP4的整数倍，combine后按原始token数恢复，覆盖小batch、非整除batch与空DP输入。空输入的实机支持仍以路由测试为准。
+
+v2镜像已离线装好适配包。已有v1新vLLM容器则先按第2节在两机宿主机更新代码，再在**各自v1实验容器内**source新env并执行：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm/moe_adapter
+python experiments/qwen3_vllm/verify.py --image-only --moe-adapter
+```
+
+此项不下载、不更新依赖；editable安装让该容器用挂载仓库里的适配包，需记录代码HEAD。不得套用到旧SGLang容器。v2首次部署也运行上面的verify，但不必重复安装。适配包校验vLLM/Ascend/Torch版本及五个关键源码文件SHA256；不匹配就拒绝启用，回传差异，不删除保护逻辑。镜像构建检查不初始化NPU。
+
+两机容器可执行CPU回归及命令预览，不占用卡：
+
+```bash
+python experiments/qwen3_vllm/test_moe_adapter.py
+python experiments/qwen3_vllm/runtime.py serve --role d8-228 --layout pd8 --moe-comm alltoall --dry-run
+```
+
+无需再建一个vllm仓库：固定镜像已有框架，额外宿主机vLLM-Ascend仓库供proxy使用。本实验仓库分发适配代码；UMDK/CAM保持不动。
+
+### 8.1.2 先做无权重EP4/EP8路由测试
+
+确认实验卡可用并正常结束自己的模型服务，不与第6–8节服务同时运行。下面的`torchrun`**仅用于小型路由probe**，正式模型serve依然不用torchrun。probe验证真实HCCL Dispatch/Combine、TP切分/拼回、均匀/不均匀token、热点专家与空DP输入；专家计算用已知缩放替代，不加载权重、不连接PD store、不测试真实FFN或KV。
+
+228容器source新env后先做EP4（物理0–3）：
+
+```bash
+set -o pipefail
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 --master_addr=10.155.205.228 --master_port=29609 experiments/qwen3_vllm/moe_probe.py 2>&1 | tee "experiments/qwen3_vllm/results/moe-ep4-$(date +%Y%m%d-%H%M%S).log"
+```
+
+需最终`MOE_A2A_ROUTING_PASS ep=4`，不是只看某个worker初始化日志。结束全部probe进程后，做跨机EP8：228物理4–7、238物理0–3，各本地TP4，保持与D8一致。两机下面两个窗口要同时启动。
+
+228容器：
+
+```bash
+set -o pipefail
+ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --nnodes=2 --node_rank=0 --master_addr=10.155.205.228 --master_port=29610 experiments/qwen3_vllm/moe_probe.py 2>&1 | tee "experiments/qwen3_vllm/results/moe-ep8-228-$(date +%Y%m%d-%H%M%S).log"
+```
+
+238容器（注意node_rank=1）：
+
+```bash
+set -o pipefail
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --nnodes=2 --node_rank=1 --master_addr=10.155.205.228 --master_port=29610 experiments/qwen3_vllm/moe_probe.py 2>&1 | tee "experiments/qwen3_vllm/results/moe-ep8-238-$(date +%Y%m%d-%H%M%S).log"
+```
+
+最终rank0需输出`MOE_A2A_ROUTING_PASS ep=8`，所有进程正常退出。若热点/空负载、NPU permute或all_to_all_single失败，保留两端最早错误，停止升到模型测试；不静默改成AllGather。rank失败时其他rank可能等到180秒超时。实际NPU路径仍由HCCL/环境决定，不能从“All-to-All”名称推定HCCS链路。
+
+### 8.1.3 单机模型输出对照，然后PD4/PD8
+
+先按第6节不加开关启动native单机模型，正常生成后，在228另开新容器窗口保存固定短prompt的确定性输出：
+
+```bash
+python experiments/qwen3_vllm/compare_outputs.py collect --output experiments/qwen3_vllm/results/solo-native-output.json
+```
+
+停止自己的native服务并确认worker退出，再启动All-to-All版本：
+
+```bash
+set -o pipefail
+python -u experiments/qwen3_vllm/runtime.py serve --role solo-228 --moe-comm alltoall 2>&1 | tee "experiments/qwen3_vllm/results/solo-a2a-$(date +%Y%m%d-%H%M%S).log"
+```
+
+启动成功后在另一个已source的客户端容器窗口保存并比较（结果文件已存在时换新轮次名字，工具不会覆盖）：
+
+```bash
+python experiments/qwen3_vllm/compare_outputs.py collect --output experiments/qwen3_vllm/results/solo-alltoall-output.json
+python experiments/qwen3_vllm/compare_outputs.py compare --native experiments/qwen3_vllm/results/solo-native-output.json --alltoall experiments/qwen3_vllm/results/solo-alltoall-output.json
+```
+
+`OUTPUT_SMOKE_MATCH`只是三个短prompt的回归，不是完整模型质量验收。AllGather和All-to-All的浮点归约顺序不同，greedy输出不一定逐字相同；出现差异必须检查logits/生成质量并扩充样本，不能忽略或当作拥塞收益。EP8还需在native/All-to-All的PD8 proxy上分别采集同样输出（collect加`--url http://10.155.205.228:30080`），覆盖DP2路径。
+
+单机通过后正常退出，复用第7节PD4的P/D命令，两端均加`--moe-comm alltoall`；proxy、KV配置不变。PD4通过后按第8节升至PD8，三处模型命令明确如下（各在对应已source的容器窗口）：
+
+```bash
+# 228，P4窗口
+python -u experiments/qwen3_vllm/runtime.py serve --role p-228 --layout pd8 --moe-comm alltoall
+# 228，D的DP rank0窗口
+python -u experiments/qwen3_vllm/runtime.py serve --role d8-228 --layout pd8 --moe-comm alltoall
+# 238，D的DP rank1窗口
+python -u experiments/qwen3_vllm/runtime.py serve --role d8-238 --layout pd8 --moe-comm alltoall
+```
+
+启动第8节同样的proxy，重复短请求、输出对照与workload。P的EP4和D的EP8是两个独立通信域，MoE不会横跨P与D组；正常KV流量仍跨这些角色。首轮不同时加DRAM Pool/CAM。
+
+验收日志依次看：`QWEN_MOE_A2A_INSTALLED`、每rank的`QWEN_MOE_POLICY_SELECTED=ALLTOALL`及EP/TP ranks、`QWEN_MOE_A2A_DISPATCH/COMBINE ep=4/8`。日志只打印前两次（可能发生在warmup），还需第11节device profile确认真实请求窗口的payload All-to-All，不只看Host范围`QWEN_MOE_A2A::dispatch/combine`。A2A内部仍有专家计数元数据AllGather、TP输出恢复AllGather；看到它们不等于回退成AllGather MoE。
+
+回退：停止自己的A2A服务，去掉`--moe-comm alltoall`或改为`--moe-comm native`后重新启动。适配包保留在容器中也不会默认生效，无需卸载，不修改权重。任何失败不自动回退，以免污染实验结论。
 
 ## 9 可选：小容量Host DRAM共享池接口验证
 
@@ -356,9 +456,9 @@ python -u experiments/qwen3_vllm/runtime.py serve --role d-238 --layout pd4 --po
 - 将Attention TP的AllReduce/ReduceScatter接入到固定vLLM通信接口；仅修改目标TP组，不拦截MoE/其他组；保持off / hccl-a2a / cam-detour三种对照。
 - vLLM使用ASCEND_RT_VISIBLE_DEVICES选择卡，逻辑local rank会重编号。必须显式维护逻辑rank→物理卡→CAM rank映射，不能把D在228的逻辑0当物理0；它对应物理4。
 - 原八卡CAM资源域需要P/D/Pool或中继owner全部提供窗口；在三角色启动和退出时保证域生命周期，不能只拉一个CAM worker。
-- 解决A2 EP8实际MoE后端差异。若要求Dispatch/Combine All-to-All，需独立适配/正确性测试；不能只改一个配置名声称获得All-to-All，也不为满足EP16强行改变P4+D8+Pool4布局。
+- 按8.1节完成A2 EP4/EP8的All-to-All路由、真实FFN/输出、PD及profile验收；本次已有接入代码，但尚未实机验证。不为满足原生MC2的EP16条件强行改变P4+D8+Pool4布局。
 - 若保留独立四卡HBM Pool，需验证可在A2注册/挂载NPU内存的存储后端及provider，再做远端恢复；标准DRAM Store示例不满足这个关口。
-- 每个引擎接入点、SDK版本、图模式/融合路径变化均重新检查；本轮不提供未验证的全局monkey-patch。
+- 每个引擎接入点、SDK版本、图模式/融合路径变化均重新检查；MoE适配是显式worker内的固定源码运行时补丁，不是对所有服务生效的默认全局补丁。
 
 这些关口未通过前，只能说“原生基线或DRAM缓存接口验证”，不能说“三流冲突实验已跑通”。
 
@@ -366,7 +466,7 @@ python -u experiments/qwen3_vllm/runtime.py serve --role d-238 --layout pd4 --po
 
 ### 11.1 当前能测什么
 
-当前可比较原生PD在不同负载下的TTFT/TPOT，以及额外DRAM共享池带来的变化。它们只能说明干扰/性能变化，**不能单独证明CAM、MoE All-to-All与HBM KV三类流量争用同一条物理链路**。
+原生PD可比较不同负载下TTFT/TPOT及额外DRAM共享池带来的变化。8.1节验收通过后，可以再比较MoE AllGather与All-to-All，并研究All-to-All与正常P→D KV的干扰。但CAM、独立HBM Pool未接入，**不能单独证明CAM、MoE All-to-All与HBM KV三类流量争用同一条物理链路**。MoE后端性能差异本身也不等于冲突。
 
 客户端指标采集已改为OpenAI `/v1/completions`，不再用SGLang `/generate`。SSE按完整行解析，EOF缺少完成标记计为失败。TPOT使用服务上报的completion_tokens估算，不把每个SSE包当一个token；reported_usage缺失则不计算TPOT。profile运行与纯性能运行分开，避免profile开销污染结果。
 
@@ -379,7 +479,7 @@ python experiments/qwen3_vllm/workload.py --summarize experiments/qwen3_vllm/res
 
 ### 11.2 最终实验的对照矩阵
 
-完成第10节后，才组合三种算子模式（off / hccl-a2a / cam-detour）与额外Pool搬运（无 / 有）。所有组保留相同MoE、正常P→D KV和请求负载；“Pool搬运无”不是“所有KV流量为零”。hccl-a2a控制CAM分块/归约/launch的额外开销。另做单独通信回放分离各类通信的时延，但不能把回放当成真实serving结果。
+完成第10节后，才组合三种CAM/TP算子模式（off / hccl-a2a / cam-detour）与额外Pool搬运（无 / 有）。这里的TP算子`hccl-a2a`是未来CAM对照，**不同于本次`--moe-comm alltoall`的MoE后端开关**。所有组固定同一种已验收MoE后端、正常P→D KV和请求负载；“Pool搬运无”不是“所有KV流量为零”。hccl-a2a控制CAM分块/归约/launch的额外开销。另做单独通信回放分离各类通信的时延，但不能把回放当成真实serving结果。
 
 判断物理冲突必须同时具备：
 
@@ -399,6 +499,7 @@ python experiments/qwen3_vllm/workload.py --summarize experiments/qwen3_vllm/res
 | TE初始化/读失败 | 首条Mooncake/ADXL错误、NPU IP/链路、probe源是否存活；不重下权重 |
 | 权重加载/启动OOM | 最早traceback、该轮npu-smi、角色/卡号/预算；不是所有OOM都能靠缩上下文解决 |
 | EP8建组失败 | 同轮两端D日志、DP rank/IP/接口；不只启动一端D |
+| MoE A2A失败 | 适配包/source指纹、每rank策略日志、EP4/8 probe两端最早错误；不自动回退 |
 | HTTPConnectionPool | 确认是228/238内部PD接口，还是误访问公网；公网权重查询与PD通信不是一回事 |
 | Store put/get失败 | master/worker同轮日志、真实对象和segment信息；DRAM检查不算HBM验证 |
 
@@ -408,9 +509,9 @@ python experiments/qwen3_vllm/workload.py --summarize experiments/qwen3_vllm/res
 
 ## 13 验证状态与依据
 
-本轮助手只在无NPU环境核对固定源码、镜像manifest、命令构造并运行CPU/模拟回归；**没有在228/238构建或启动新镜像，没有验证TE跨机读、模型质量、PD8、Store命中或三流性能**。只有你实机输出相应成功标记和证据，才进入下一关。
+本轮助手只在无NPU环境核对固定源码、镜像manifest、命令构造并运行CPU/模拟回归；**没有在228/238构建或启动新镜像，没有验证A2 MoE All-to-All kernel、TE跨机读、模型质量、PD8、Store命中或三流性能**。只有你实机输出相应成功标记和证据，才进入下一关。
 
-CPU检查入口：`python experiments/qwen3_vllm/test_cpu.py`。它不导入Torch或初始化NPU；A2无需为了这些测试安装另一套依赖。
+CPU检查入口：`python experiments/qwen3_vllm/test_cpu.py`与`python experiments/qwen3_vllm/test_moe_adapter.py`。它们不导入Torch或初始化NPU；A2无需为了这些测试安装另一套依赖。适配包测试包含源码指纹、模式/并行保护、空/非整除token补齐、原始长度恢复以及输出对照检查；CPU通过不替代NPU路由/模型验收。
 
 固定源码依据：
 

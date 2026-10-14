@@ -19,6 +19,7 @@ def check():
     p.add_argument("--model", action="store_true")
     p.add_argument("--source", action="store_true")
     p.add_argument("--image-only", action="store_true", help="Metadata/provenance only; no device-library imports")
+    p.add_argument("--moe-adapter", action="store_true", help="Check the opt-in All-to-All package and pinned source fingerprints")
     args = p.parse_args()
     failures = []
     print("PYTHON", platform.python_version(), "ARCH", platform.machine())
@@ -101,6 +102,13 @@ def check():
         print("PROXY_SOURCE", sha)
         if sha != SHAS["vllm-ascend"]:
             failures.append("Proxy source is not pinned v0.22.1rc1")
+    if args.moe_adapter:
+        try:
+            from qwen_moe_adapter.policy import check_installation
+            print("MOE_ADAPTER_VERSION", md.version("qwen-vllm-moe-adapter"))
+            print("MOE_ADAPTER_SOURCE_OK", check_installation())
+        except Exception as exc:
+            failures.append("MoE adapter: " + str(exc))
     if failures:
         raise SystemExit("QUALIFICATION_FAILED\n" + "\n".join(failures))
     print("QUALIFICATION_PASS (not an NPU transfer or inference test)")
