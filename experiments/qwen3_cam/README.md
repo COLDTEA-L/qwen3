@@ -1,5 +1,7 @@
 # Qwen3 A2 实验指导：vLLM-Ascend + Mooncake 基线与 MoE All-to-All 接入
 
+> **后续新实验入口已调整：** 按最新要求使用CANN 8.2.RC1、vLLM原生Qwen MoE和CAM TP多路径，完整构建/权重/P4+D8指导见[CAM82新指导](../qwen3_vllm_cam82/README.md)。下文保留为上一轮CANN9基线，不能混合执行，也不要把其MoE worker补丁安装到CAM82镜像。
+
 更新：2026-10-14。机器均以 **228 / 238** 指代，个人目录均为 `/ssd_2/yuanwenliu`。本文替代旧的默认执行步骤；[SGLang 历史指导](README.sglang-legacy.md)保留作回退与取证，不与新环境混用。
 
 ## 0 本次迁移的范围和两个重要限制

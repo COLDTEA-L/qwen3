@@ -1,0 +1,10 @@
+results
+profiles
+**/__pycache__
+**/*.egg-info
+adapter/build
+adapter/dist
+vendor/Mooncake/build
+vendor/yalantinglibs/build
+vendor/umdk/src/cam/comm_operator/build
+vendor/umdk/output
