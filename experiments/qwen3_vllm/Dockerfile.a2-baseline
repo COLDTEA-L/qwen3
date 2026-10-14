@@ -1,0 +1,8 @@
+# Official A2 arm64 child manifest, queried 2026-10-14. No new pip dependencies.
+ARG A2_BASE_IMAGE=quay.io/ascend/vllm-ascend@sha256:638fc04eaa3654fcf14688096ed4e9d88ea0d905fa8685eed4b36d5fffe8fd8d
+FROM ${A2_BASE_IMAGE}
+USER root
+COPY runtime.py verify.py /opt/qwen3-vllm/
+RUN python /opt/qwen3-vllm/verify.py --image-only
+WORKDIR /ssd_2/yuanwenliu/sglang
+CMD ["/bin/bash"]
