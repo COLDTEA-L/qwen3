@@ -8,7 +8,9 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh || return
 source /usr/local/Ascend/nnal/atb/set_env.sh || return
 export QWEN_CAM82_HOST="$1" VLLM_HOST_IP="10.155.205.$1" HCCL_IF_IP="10.155.205.$1"
 export GLOO_SOCKET_IFNAME=enp67s0f5 HCCL_SOCKET_IFNAME=enp67s0f5 TP_SOCKET_IFNAME=enp67s0f5
-export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Toolkit runtime libraries precede SDK devlib/other copies of CANN dependencies.
+# Do not prepend SDK stubs ahead of the matched runtime libraries.
+export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64:/usr/local/lib:/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export MODEL_PATH=/ssd_2/yuanwenliu/models/Qwen3-30B-A3B
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_USE_V1=1
 export VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP=0 VLLM_ASCEND_ENABLE_PREFETCH_MLP=0 VLLM_ASCEND_ENABLE_FLASHCOMM=0

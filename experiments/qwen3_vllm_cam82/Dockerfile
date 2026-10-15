@@ -26,12 +26,18 @@ COPY vendor/umdk /opt/umdk-cam82
 RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/aarch64-linux/devlib:${LD_LIBRARY_PATH}" && \
+    export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/aarch64-linux/devlib" && \
+    python -c 'import torch, torch_npu; print("CAM82_BUILD_TORCH_IMPORT_OK", torch.__version__, torch_npu.__version__)' && \
     BUILD_JOBS=4 bash /opt/umdk-cam82/build/cam/comm_operator/build_qwen3_all2all_detour.sh ascend910b4 && \
     wheels=(/opt/umdk-cam82/output/cam/qwen3-all2all/wheel/*.whl) && test "${#wheels[@]}" = 1 && \
     python -m pip install --no-deps --no-index "${wheels[0]}" && \
     install -m 755 /opt/umdk-cam82/output/cam/qwen3-all2all/comm-build/libcam.so /usr/local/lib/libcam.so && ldconfig
 COPY check.py /opt/cam82/check.py
-RUN python /opt/cam82/check.py && python -m pip freeze > /opt/cam82/packages.txt
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/aarch64-linux/devlib" && \
+    python /opt/cam82/check.py && \
+    python -c 'import torch, torch_npu, umdk_cam_op_lib; from mooncake.engine import TransferEngine; print("CAM82_NATIVE_IMPORT_OK", torch.__version__, torch_npu.__version__)' && \
+    python -m pip freeze > /opt/cam82/packages.txt
 WORKDIR /ssd_2/yuanwenliu/sglang
 CMD ["/bin/bash"]

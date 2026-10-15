@@ -203,6 +203,16 @@ docker image inspect qwen3-vllm:cam82-v1 --format '{{.Id}} {{.Architecture}}'
 
 CANN metadata、源码指纹、库/API或编译不匹配就停止，回传最早错误；不安装最新torch_npu兜底。构建用SDK/devlib编译，不验证设备执行。Mooncake旧HCCL transport与固定CANN的编译/运行是新的关口，不宣称必然通过。
 
+#### 4.5.1 已定位：CAM构建时ErrorManager未定义符号
+
+2026-10-15的238实测：devlib优先时`import torch, torch_npu`报`libruntime_common.so: undefined symbol: _ZN12ErrorManager19ATCReportErrMessage...`；同一基础镜像改为toolkit的`lib64`、`aarch64-linux/lib64`优先后，输出`IMPORT_OK 2.7.1+cpu 2.7.1.dev20250724`。这说明动态库搜索顺序会触发该错误，不是已证明需要换Torch/CANN版本，也不是模型或权重错误；尚未通过loader跟踪定位具体冲突的依赖库文件。
+
+原Dockerfile中devlib优先的写法已修正。新版CAM构建步骤先source CANN/NNAL，然后把toolkit运行库放前、devlib放后；新增`CAM82_BUILD_TORCH_IMPORT_OK`检查，再编译CAM。镜像结束前还检查Torch、torch_npu、CAM扩展及Mooncake原生模块导入，需`CAM82_NATIVE_IMPORT_OK`。运行时`env.sh`同样把toolkit运行库放在前面。
+
+若遇到这次错误：更新本实验仓库后，**直接重跑4.5原来的docker build命令**；不重新下载基础镜像、vendor或权重，不先做4.6。不要加`--no-cache`或清理已有构建缓存，Docker通常能复用前面成功的层，从修改后的CAM层继续。当前只有基础镜像的导入顺序测试通过，新Dockerfile是否完全编译成功仍要看本轮结果。
+
+不要用`TORCH_DEVICE_BACKEND_AUTOLOAD=0`跳过NPU后端加载来当作修复；它不能证明torch_npu或CAM可用。也不要把其他CANN版本的同名`.so`复制到镜像里。如果新版导入检查仍失败，保留第一个错误和对应构建层，停止后续步骤。
+
 ### 4.6 238保存并传输实验镜像（构建成功后）
 
 ```bash
@@ -376,6 +386,7 @@ device profile：每个模型启动窗口在启动前设置不同的`VLLM_TORCH_
 | --- | --- |
 | build | 第一处错误、ImageID/Architecture、当前源码HEAD；不要继续run不存在镜像 |
 | package/source check | 实际元数据/源码指纹、CANN版本；不混装9.0wheel |
+| CAM构建Torch import出现ErrorManager符号错误 | 先看4.5.1，使用更新后的toolkit优先顺序；不通过关闭NPU自动加载绕过 |
 | CAM init/挂起 | 两机整轮P/D/relay日志、物理映射、10067的具体监听；不贴全部端口 |
 | TP correctness | 两个TP4 probe日志、dtype/shape/维度、首次错误 |
 | MoE native错误 | Qwen类/原生state/EP ranks、空/非整除batch、最早traceback；本轮不改MoE运输 |

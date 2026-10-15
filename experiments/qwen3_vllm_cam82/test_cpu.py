@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -183,6 +184,22 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("--entrypoint python qwen3-vllm:cam82-base -m pip show", section)
         self.assertNotRegex(section, r"(?m)^docker pull ")
         self.assertNotRegex(section, r"(?m)^docker (?:image inspect|run).*quay\.io/")
+
+    def test_toolkit_libraries_precede_devlib_and_local_copies(self):
+        docker = (HERE / "Dockerfile").read_text()
+        cam_stage = docker.split('RUN test "$(git -C /opt/umdk-cam82', 1)[1].split("COPY check.py", 1)[0]
+        self.assertNotIn('LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/aarch64-linux/devlib:', cam_stage)
+        ld_line = next(line.strip().removesuffix(" && \\") for line in cam_stage.splitlines()
+                       if line.strip().startswith("export LD_LIBRARY_PATH="))
+        env_line = next(line for line in (HERE / "env.sh").read_text().splitlines()
+                        if line.startswith("export LD_LIBRARY_PATH="))
+        for assignment in (ld_line, env_line):
+            script = 'ASCEND_HOME_PATH=/mock/cann\nLD_LIBRARY_PATH=/mock/cann/aarch64-linux/devlib:/mock/atb\n'
+            script += assignment + '\nprintf "%s" "$LD_LIBRARY_PATH"'
+            paths = subprocess.check_output(["bash", "-c", script], text=True).split(":")
+            self.assertEqual(paths[:2], ["/mock/cann/lib64", "/mock/cann/aarch64-linux/lib64"])
+        self.assertLess(cam_stage.index("CAM82_BUILD_TORCH_IMPORT_OK"), cam_stage.index("BUILD_JOBS=4"))
+        self.assertIn("CAM82_NATIVE_IMPORT_OK", docker)
 
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")
