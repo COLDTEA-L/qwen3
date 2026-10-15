@@ -238,6 +238,85 @@ class PolicyTests(unittest.TestCase):
         self.assertLess(cam_stage.index("CAM82_PREGEN_PREFIX_PATCH_OK"), cam_stage.index("BUILD_JOBS=4"))
         self.assertIn("4.5.2 已定位", (HERE / "README.md").read_text())
 
+    def test_cann_env_helper_is_installed_and_guarded_before_cam_build(self):
+        docker = (HERE / "Dockerfile").read_text()
+        self.assertIn("COPY build_helpers/source_cann_env_compat.sh /opt/umdk-cam82/build/cam/comm_operator/", docker)
+        self.assertIn("apply --check /opt/cam82/umdk-cann-env-guard.patch", docker)
+        self.assertLess(docker.index("CAM82_CANN_ENV_PATCH_OK"), docker.index("BUILD_JOBS=4"))
+        text = (HERE / "patches/umdk-cann-env-guard.patch").read_text()
+        self.assertIn("+set -Eeo pipefail", text)
+        self.assertIn('+    source "${MODULE_SCRIPTS_PATH}/source_cann_env_compat.sh"', text)
+        self.assertIn("4.5.3 已定位", (HERE / "README.md").read_text())
+
+
+class CannEnvTests(unittest.TestCase):
+    """The SDK fixture reproduces a grep miss without requiring CANN or Torch."""
+
+    def run_sdk(self, body, missing=None, tail='echo BUILD_NEXT_OK'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("bin", "include/acl", "opp", "tools"):
+                (root / name).mkdir(parents=True)
+            (root / "include/acl/acl.h").write_text("// fixture header\n")
+            env_script = root / "bin/setenv.bash"
+            env_script.write_text(body)
+            for name in ("msopgen", "cmake"):
+                tool = root / "tools" / name
+                tool.write_text("#!/bin/bash\nexit 0\n")
+                tool.chmod(0o755)
+            if missing:
+                target = root / missing
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
+            script = '''set -Ee -o pipefail
+trap 'rc=$?; printf "STRICT_FAIL rc=%s source=%s line=%s\\n" "$rc" "${BASH_SOURCE[0]:-shell}" "$LINENO" >&2; exit "$rc"' ERR
+export ASCEND_HOME_PATH="$1"
+export ASCEND_OPP_PATH="$1/opp"
+export PATH="$1/tools"
+export LD_LIBRARY_PATH="$1/aarch64-linux/devlib:/mock/atb"
+source "$2"
+printf "SDK_LD=%s\\n" "$LD_LIBRARY_PATH"
+'''
+            return subprocess.run(["/bin/bash", "-c", script + tail, "test", str(root),
+                                   str(HERE / "build_helpers/source_cann_env_compat.sh")],
+                                  capture_output=True, text=True)
+
+    def test_grep_miss_can_finish_env_and_preserve_exports(self):
+        body = 'printf "available\\n" | /usr/bin/grep "absent" >/dev/null\nexport SDK_FINISH_SEEN=yes\nreturn 0\n'
+        result = self.run_sdk(body, tail='test "$SDK_FINISH_SEEN" = yes\necho BUILD_NEXT_OK')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CAM82_CANN_ENV_READY", result.stdout)
+        self.assertIn("BUILD_NEXT_OK", result.stdout)
+        paths = next(line for line in result.stdout.splitlines() if line.startswith("SDK_LD=")).split("=", 1)[1].split(":")
+        self.assertTrue(paths[0].endswith("/lib64"))
+        self.assertTrue(paths[1].endswith("/aarch64-linux/lib64"))
+        self.assertTrue(paths[-1].endswith("/aarch64-linux/devlib"))
+
+    def test_nonzero_final_sdk_status_is_not_ignored(self):
+        result = self.run_sdk("return 7\n")
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("CANN environment returned 7; stopping", result.stderr)
+        self.assertNotIn("CAM82_CANN_ENV_READY", result.stdout)
+        self.assertNotIn("BUILD_NEXT_OK", result.stdout)
+
+    def test_missing_sdk_resources_and_tools_are_fatal(self):
+        for missing in ("bin/setenv.bash", "include/acl/acl.h", "opp", "tools/msopgen", "tools/cmake"):
+            with self.subTest(missing=missing):
+                result = self.run_sdk("return 0\n", missing=missing)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("[cam82_env] missing", result.stderr)
+                self.assertNotIn("CAM82_CANN_ENV_READY", result.stdout)
+                self.assertNotIn("BUILD_NEXT_OK", result.stdout)
+
+    def test_build_failure_after_env_still_stops_immediately(self):
+        result = self.run_sdk("return 0\n", tail="/bin/false\necho BUILD_NEXT_OK")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("CAM82_CANN_ENV_READY", result.stdout)
+        self.assertIn("STRICT_FAIL rc=1", result.stderr)
+        self.assertNotIn("BUILD_NEXT_OK", result.stdout)
+
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")
 class NumericTests(unittest.TestCase):

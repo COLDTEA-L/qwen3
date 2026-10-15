@@ -1,6 +1,6 @@
 # Qwen3：CANN 8.2 / vLLM 原生 MoE + CAM TP 多路径实验
 
-更新：2026-10-15。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。代码已接入，**未在910B4实机编译/跑通**；每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
+更新：2026-10-16。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。代码已接入，**未在910B4实机完整编译/跑通**；每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
 
 ## 1 布局、版本与接入边界
 
@@ -23,7 +23,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 | Python / torch / torch_npu | 3.11 / 2.7.1 / 2.7.1.dev20250724 |
 | Mooncake源码 | v0.3.9，`a00f75742469d6cc408bc5393b73c501e92dc74a` |
 | Mooncake构建 | USE_ASCEND=ON（旧HCCL Ascend transport），USE_ASCEND_DIRECT=OFF；仅TE，不建Store |
-| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的pregen文件名前缀修正，见4.5.2 |
+| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.3 |
 
 版本来源：[官方8.2 Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/Dockerfile)、[配套表](https://github.com/vllm-project/vllm-ascend/blob/v0.22.1rc1/docs/source/community/versioning_policy.md)。旧版本维护/特性有差异；源码/版本保护拒绝不匹配，不取消保护去混装。25.5.2驱动与这组旧用户态软件的实际兼容性还需NPU关口确认。
 
@@ -77,7 +77,7 @@ git -C vendor/Mooncake rev-parse HEAD
 git -C vendor/Mooncake submodule status
 ```
 
-UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
+UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.3），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
 
 ## 3 权重准备：已有就复用，缺失再下载
 
@@ -113,7 +113,7 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
-**当前进度（2026-10-15）：你已完成4.2–4.4，基础镜像已用crane下载、导入并打上本地标签，arm64及四个包版本已核对。现在从4.5继续；不要重复下载或导入。磁盘空间可按4.1复查，vendor源码尚未准备齐全时先补第2节对应部分。**
+**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库已编译成功，pregen前缀和Torch导入问题已越过，但完整算子包和最终镜像尚未构建成功。当前卡点是CANN环境子脚本中的grep遇到set -e提前退出，修正见4.5.3。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
 
 ### 4.1 检查宿主机磁盘空间
 
@@ -233,6 +233,25 @@ ls experiments/qwen3_vllm_cam82/patches/umdk-all2all-pregen-prefix.patch
 有本地改动先处理，不强制覆盖。随后**重跑4.5原来的docker build命令**，代理保持可用；不重新下载基础镜像、vendor或权重，不清缓存、不加`--no-cache`。应先看到`CAM82_PREGEN_PREFIX_PATCH_OK`，再继续CAM编译。该标记仅代表补丁应用成功；必须最终本次构建退出成功且看到Successfully built/tagged，才进入4.6。
 
 补丁应用、前缀选择和pregen文件复制已做CPU回归测试，但完整CANN算子编译及NPU执行仍需在238验证。若脚本校验或补丁检查失败，不删除校验绕过，先回传最早错误。
+
+#### 4.5.3 已定位：CANN runtime环境脚本的grep触发提前退出
+
+238的严格模式定位输出为`ENV_FAIL rc=1 file=.../runtime/bin/setenv.bash line=84 command=grep "${DEP_HAL_NAME}" > /dev/null 2>&1`。因此构建在重复加载CANN环境时，被脚本内返回1的grep中止；此前日志停在`patch generated op_host CMakeLists`，并不表示CMake修补本身失败。grep返回1通常表示没有匹配；这条输出本身不证明缺少哪个HAL库、驱动不兼容或910B4不能使用该版本，不据此更换软件栈。
+
+镜像内补丁`patches/umdk-cann-env-guard.patch`让单算子脚本调用`build_helpers/source_cann_env_compat.sh`：仅在加载SDK环境的短窗口内暂时关闭`errexit`和继承的ERR trap，使SDK脚本按普通shell语义完成内部探测；加载结束立即恢复严格模式与错误诊断，**最终source返回非零仍停止**，并检查ACL头文件、OPP目录、msopgen和cmake是否可用。随后恢复已验证的toolkit运行库优先顺序。这里不是全局关闭`set -e`，也不是`source ... || true`；后续编译、打包、安装失败仍立即停止。没有修改CANN原脚本或宿主机环境。
+
+同时开启ERR trap继承，后续错误会输出文件、行号、命令和返回码。两个补丁均只应用在镜像内的固定UMDK副本，vendor提交仍为9c0bbdad，不需另行更新GitCode分支。
+
+开发端发布本实验仓库更新后，238宿主机执行：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git status --short --branch
+git pull --ff-only origin feat/qwen3-cam-detour-conflict
+ls experiments/qwen3_vllm_cam82/patches/umdk-cann-env-guard.patch experiments/qwen3_vllm_cam82/build_helpers/source_cann_env_compat.sh
+```
+
+有本地改动先处理。然后重跑4.5的原Docker构建命令，不清缓存、不加`--no-cache`、不重下vendor/基础镜像/权重。预期在补丁标记`CAM82_CANN_ENV_PATCH_OK`之后，单算子构建会输出`CAM82_CANN_ENV_READY`，再输出`run generated build.sh`。这些仅说明越过环境加载，不表示算子或镜像已经构建成功；仍须本次构建最终退出成功且出现Successfully built/tagged，才能进入4.6。CPU回归覆盖了中间grep返回1、SDK最终失败、SDK文件/必要资源缺失及后续编译失败，不替代238上的完整编译和NPU验证。
 
 ### 4.6 238保存并传输实验镜像（构建成功后）
 

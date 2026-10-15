@@ -1,0 +1,22 @@
+diff --git a/build/cam/comm_operator/compile_single_op.sh b/build/cam/comm_operator/compile_single_op.sh
+--- a/build/cam/comm_operator/compile_single_op.sh
++++ b/build/cam/comm_operator/compile_single_op.sh
+@@ -8,7 +8,7 @@
+ #   compile_single_op.sh all_gather_detour ascend910b4 Release
+
+-set -eo pipefail
+-trap 'echo "[compile_single_op] failed at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
++set -Eeo pipefail
++trap 'rc=$?; echo "[compile_single_op] failed rc=${rc} at ${BASH_SOURCE[0]:-shell}:${LINENO}: ${BASH_COMMAND}" >&2; exit "$rc"' ERR
+
+ OP_NAME="${1:?op dir name required, e.g. all_gather_detour}"
+ SOC_VERSION="${2:?soc version required, e.g. ascend910b4 or ascend910_93}"
+@@ -175,7 +175,7 @@
+         exit 1
+     fi
+     # shellcheck disable=SC1090
+-    source "${ASCEND_HOME_PATH}/bin/setenv.bash"
++    source "${MODULE_SCRIPTS_PATH}/source_cann_env_compat.sh"
+
+     cd "${proj_name}"
+     echo "[compile_single_op] run generated build.sh in ${PWD}"
