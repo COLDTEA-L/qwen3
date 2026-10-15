@@ -27,6 +27,7 @@ COPY vendor/umdk /opt/umdk-cam82
 COPY patches/umdk-all2all-pregen-prefix.patch /opt/cam82/umdk-all2all-pregen-prefix.patch
 COPY patches/umdk-cann-env-guard.patch /opt/cam82/umdk-cann-env-guard.patch
 COPY patches/umdk-platform-include.patch /opt/cam82/umdk-platform-include.patch
+COPY patches/umdk-op-package-install.patch /opt/cam82/umdk-op-package-install.patch
 COPY build_helpers/source_cann_env_compat.sh /opt/umdk-cam82/build/cam/comm_operator/source_cann_env_compat.sh
 RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef && \
     test "$(sha256sum /opt/umdk-cam82/build/cam/comm_operator/compile_single_op.sh | cut -d ' ' -f1)" = ce9d1a7821b2956c2b56f6d4f4e8518abf99238676494c6d323dc9f2fca9c889 && \
@@ -41,6 +42,10 @@ RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5c
     git -C /opt/umdk-cam82 apply --check /opt/cam82/umdk-platform-include.patch && \
     git -C /opt/umdk-cam82 apply /opt/cam82/umdk-platform-include.patch && \
     echo CAM82_PLATFORM_INCLUDE_PATCH_OK && \
+    test "$(sha256sum /opt/umdk-cam82/build/cam/comm_operator/build_qwen3_all2all_detour.sh | cut -d ' ' -f1)" = 867b56c0f655ee0ce0e92164725d64a356eec9e2b80a0b366ae7c01e31c88a65 && \
+    git -C /opt/umdk-cam82 apply --check /opt/cam82/umdk-op-package-install.patch && \
+    git -C /opt/umdk-cam82 apply /opt/cam82/umdk-op-package-install.patch && \
+    echo CAM82_OP_INSTALL_PATCH_OK && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/aarch64-linux/devlib" && \

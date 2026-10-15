@@ -1,0 +1,20 @@
+diff --git a/build/cam/comm_operator/build_qwen3_all2all_detour.sh b/build/cam/comm_operator/build_qwen3_all2all_detour.sh
+--- a/build/cam/comm_operator/build_qwen3_all2all_detour.sh
++++ b/build/cam/comm_operator/build_qwen3_all2all_detour.sh
+@@ -23,7 +23,15 @@
+   echo "Expected exactly one matching op package; inspect output/cam/comm_operator/run" >&2
+   exit 1
+ fi
+-bash "${packages[0]}" --install
++# msopgen custom-op archives execute their installer directly, without --install.
++bash "${packages[0]}" --quiet --nox11 --install-path="${ASCEND_OPP_PATH}"
++cam_op_api="${ASCEND_OPP_PATH}/vendors/CAM/op_api"
++if [ ! -s "${cam_op_api}/lib/libcust_opapi.so" ] || \
++   [ ! -s "${cam_op_api}/include/aclnn_all2_all_detour.h" ]; then
++  echo "CAM op package returned success but required API files are missing under ${cam_op_api}" >&2
++  exit 1
++fi
++echo "CAM82_OP_PACKAGE_INSTALLED ${cam_op_api}"
+ export CAM_COMM_PATH="$source_dir"
+ export CAM_COMM_BUILD_PATH="${output_dir}/comm-build"
+ cd "${source_dir}/pybind"

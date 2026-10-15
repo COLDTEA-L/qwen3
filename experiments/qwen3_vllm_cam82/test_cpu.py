@@ -320,6 +320,73 @@ printf "SDK_LD=%s\\n" "$LD_LIBRARY_PATH"
         self.assertNotIn("BUILD_NEXT_OK", result.stdout)
 
 
+class OpPackageInstallTests(unittest.TestCase):
+    def installation_stage(self):
+        lines = (HERE / "patches/umdk-op-package-install.patch").read_text().splitlines()
+        hunk = lines[next(i for i, line in enumerate(lines) if line.startswith("@@")) + 1:]
+        revised = "\n".join(line[1:] for line in hunk if line.startswith(("+", " ")))
+        return revised[revised.index("# msopgen"):].split("export CAM_COMM_PATH", 1)[0]
+
+    def run_installation(self, mode="ok"):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "custom op.run"
+            package.write_text('''#!/bin/bash
+set -eu
+printf '%s\\n' "$@" > "$CAM82_TEST_ARGS"
+dest=
+for arg in "$@"; do
+    case "$arg" in
+        --quiet|--nox11) ;;
+        --install-path=*) dest="${arg#--install-path=}" ;;
+        *) echo "unsupported installer option: $arg" >&2; exit 99 ;;
+    esac
+done
+test "$dest" = "$CAM82_TEST_EXPECTED_OPP"
+case "$CAM82_TEST_MODE" in fail) exit 7 ;; empty) exit 0 ;; esac
+mkdir -p "$dest/vendors/CAM/op_api/lib" "$dest/vendors/CAM/op_api/include"
+if [ "$CAM82_TEST_MODE" != no-library ]; then
+    printf library > "$dest/vendors/CAM/op_api/lib/libcust_opapi.so"
+fi
+if [ "$CAM82_TEST_MODE" != no-header ]; then
+    printf header > "$dest/vendors/CAM/op_api/include/aclnn_all2_all_detour.h"
+fi
+''')
+            opp = root / "mock opp"
+            args_file = root / "installer-args.txt"
+            env = dict(os.environ, CAM82_TEST_ARGS=str(args_file), CAM82_TEST_MODE=mode,
+                       CAM82_TEST_EXPECTED_OPP=str(opp))
+            script = ('set -euo pipefail\npackages=("$1")\nexport ASCEND_OPP_PATH="$2"\n' +
+                      self.installation_stage() + '\necho WHEEL_STAGE_REACHED\n')
+            result = subprocess.run(["/bin/bash", "-c", script, "test", str(package), str(opp)],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            return result, args_file.read_text().splitlines(), str(opp)
+
+    def test_supported_arguments_install_into_current_opp(self):
+        result, args, opp = self.run_installation()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(args, ["--quiet", "--nox11", "--install-path=" + opp])
+        self.assertIn("CAM82_OP_PACKAGE_INSTALLED", result.stdout)
+        self.assertIn("WHEEL_STAGE_REACHED", result.stdout)
+
+    def test_installer_failure_or_missing_files_never_reaches_wheel_stage(self):
+        for mode in ("fail", "empty", "no-library", "no-header"):
+            with self.subTest(mode=mode):
+                result, _, _ = self.run_installation(mode)
+                self.assertEqual(result.returncode, 7 if mode == "fail" else 1, result.stderr)
+                self.assertNotIn("CAM82_OP_PACKAGE_INSTALLED", result.stdout)
+                self.assertNotIn("WHEEL_STAGE_REACHED", result.stdout)
+                if mode != "fail": self.assertIn("required API files are missing", result.stderr)
+
+    def test_install_patch_is_guarded_and_applied_before_build(self):
+        docker = (HERE / "Dockerfile").read_text()
+        self.assertIn("867b56c0f655ee0ce0e92164725d64a356eec9e2b80a0b366ae7c01e31c88a65", docker)
+        self.assertIn("apply --check /opt/cam82/umdk-op-package-install.patch", docker)
+        self.assertLess(docker.index("CAM82_OP_INSTALL_PATCH_OK"), docker.index("BUILD_JOBS=4"))
+        self.assertNotIn('" --install\n', self.installation_stage())
+        self.assertIn("4.5.5 已定位", (HERE / "README.md").read_text())
+
+
 class PlatformIncludeTests(unittest.TestCase):
     def patcher(self):
         # Reconstruct the changed embedded Python from the actual shipped hunk,

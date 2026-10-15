@@ -23,7 +23,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 | Python / torch / torch_npu | 3.11 / 2.7.1 / 2.7.1.dev20250724 |
 | Mooncake源码 | v0.3.9，`a00f75742469d6cc408bc5393b73c501e92dc74a` |
 | Mooncake构建 | USE_ASCEND=ON（旧HCCL Ascend transport），USE_ASCEND_DIRECT=OFF；仅TE，不建Store |
-| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.4 |
+| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.5 |
 
 版本来源：[官方8.2 Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/Dockerfile)、[配套表](https://github.com/vllm-project/vllm-ascend/blob/v0.22.1rc1/docs/source/community/versioning_policy.md)。旧版本维护/特性有差异；源码/版本保护拒绝不匹配，不取消保护去混装。25.5.2驱动与这组旧用户态软件的实际兼容性还需NPU关口确认。
 
@@ -77,7 +77,7 @@ git -C vendor/Mooncake rev-parse HEAD
 git -C vendor/Mooncake submodule status
 ```
 
-UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.4），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
+UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.5），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
 
 ## 3 权重准备：已有就复用，缺失再下载
 
@@ -113,7 +113,7 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
-**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库已编译成功，pregen前缀、Torch导入和CANN环境加载问题已越过，但完整算子包和最终镜像尚未构建成功。当前卡点是cust_opapi缺少平台头文件搜索路径；已确认头文件在固定镜像中，修正见4.5.4。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
+**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库及算子.run包已编译生成，头文件路径问题已越过，但安装和最终镜像尚未完成。当前卡点是安装命令误用了该自定义算子包不支持的--install参数，修正见4.5.5。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
 
 ### 4.1 检查宿主机磁盘空间
 
@@ -276,6 +276,31 @@ ls experiments/qwen3_vllm_cam82/patches/umdk-platform-include.patch
 ```
 
 有本地改动先处理。随后重跑4.5的原Docker构建命令，不清缓存、不重新下载、不更新UMDK分支。应先看到`CAM82_PLATFORM_INCLUDE_PATCH_OK`，进入生成项目的CMake后再看到`CAM82_PLATFORM_INCLUDE=.../include/experiment/platform`。本地CPU回归用真实主机编译器复现了未补路径时的头文件错误，补路径后成功编译模拟库，并检查该路径不影响其他目标、修补可重复执行、头文件缺失仍停止。这不是完整Ascend算子编译成功的证明；仍以238本次Docker构建最终退出成功且出现Successfully built/tagged为准，之后才能进入4.6。
+
+#### 4.5.5 已定位：.run已生成，但--install导致只打印Usage并失败
+
+日志已输出`[compile_single_op] output: .../CAM_ascend910b4_all_to_all_detour_ubuntu_aarch64.run`，说明单算子编译和打包已完成；随后出现Usage并返回1，失败的是安装，不是前面的编译。原构建辅助脚本使用了`bash "${packages[0]}" --install`，而本次msopgen自定义算子包列出的参数没有`--install`，不能套用CANN toolkit大安装包的安装命令。
+
+新增`patches/umdk-op-package-install.patch`，将镜像内的安装调用修正为：
+
+```bash
+bash "${packages[0]}" --quiet --nox11 --install-path="${ASCEND_OPP_PATH}"
+```
+
+这是脚本内部命令，不要在宿主机直接执行上述变量命令。`--quiet`避免交互，`--nox11`不启动图形终端；安装路径显式选择当前CANN的OPP根目录，算子仍进入`$ASCEND_OPP_PATH/vendors/CAM`。自定义算子包直接执行安装、`--install-path=<path>`落在`<path>/vendors/<vendor_name>`的规则见[官方自定义算子部署说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha001/devaids/optool/atlasopdev_16_0155.html)，参数含义也可对照[Ascend自定义算子包参数表](https://github.com/Ascend/RecSDK/blob/develop/docs/en/torch/torch_rec_v1/recsdk_torch_installation_guide.md)。最终仍以本次生成包的帮助信息和238实测为准，不混用toolkit安装参数。
+
+安装命令成功后，脚本还检查`vendors/CAM/op_api/lib/libcust_opapi.so`及`vendors/CAM/op_api/include/aclnn_all2_all_detour.h`均非空，才输出`CAM82_OP_PACKAGE_INSTALLED`并继续构建Python wheel。安装返回非零或缺少必要文件都会立即停止，不把“打印Usage”或只解压文件视为成功。此修正只改镜像内固定UMDK副本的构建辅助脚本，不改宿主机或CANN原文件，也不需要发布新的UMDK分支。
+
+开发端发布本实验仓库更新后，238宿主机执行：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git status --short --branch
+git pull --ff-only origin feat/qwen3-cam-detour-conflict
+ls experiments/qwen3_vllm_cam82/patches/umdk-op-package-install.patch
+```
+
+有本地改动先处理。随后重跑4.5的原Docker构建命令。不要清缓存或重新下载；失败的RUN层会重新执行其中的编译与安装步骤，前面成功层仍可复用。先看到补丁标记`CAM82_OP_INSTALL_PATCH_OK`，再检查实际安装后的`CAM82_OP_PACKAGE_INSTALLED`；这两条仍不表示wheel或最终镜像已完成。安装流程的CPU模拟回归已覆盖参数传递、安装失败、返回成功但文件缺失的情况；真实.run安装、后续wheel及最终导入仍需238验证。只有本次构建退出成功且出现Successfully built/tagged，才能进入4.6。
 
 ### 4.6 238保存并传输实验镜像（构建成功后）
 
