@@ -3,6 +3,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -316,6 +318,99 @@ printf "SDK_LD=%s\\n" "$LD_LIBRARY_PATH"
         self.assertIn("CAM82_CANN_ENV_READY", result.stdout)
         self.assertIn("STRICT_FAIL rc=1", result.stderr)
         self.assertNotIn("BUILD_NEXT_OK", result.stdout)
+
+
+class PlatformIncludeTests(unittest.TestCase):
+    def patcher(self):
+        # Reconstruct the changed embedded Python from the actual shipped hunk,
+        # not a second implementation of its CMake modification.
+        lines = (HERE / "patches/umdk-platform-include.patch").read_text().splitlines()
+        hunk = lines[next(i for i, line in enumerate(lines) if line.startswith("@@")) + 1:]
+        revised = "\n".join(line[1:] for line in hunk if line.startswith(("+", " ")))
+        prefix = '''import sys
+from pathlib import Path
+cmake_file = Path(sys.argv[1])
+text = cmake_file.read_text()
+insert = """
+if(EXISTS "${CMAKE_SOURCE_DIR}/pregen/build_out/autogen")
+    file(COPY "${CMAKE_SOURCE_DIR}/pregen/build_out/autogen/"
+         DESTINATION "${ASCEND_AUTOGEN_PATH}"
+         FILES_MATCHING
+         PATTERN "aclnn_*.cpp"
+         PATTERN "aclnn_*.h")
+'''
+        return prefix + revised.split("\nPY\n", 1)[0]
+
+    def apply_to(self, path):
+        subprocess.run([sys.executable, "-c", self.patcher(), str(path)],
+                       check=True, capture_output=True, text=True)
+
+    def test_platform_patch_is_target_scoped_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cmake_file = Path(directory) / "CMakeLists.txt"
+            cmake_file.write_text('file(GLOB aclnn_src ${ASCEND_AUTOGEN_PATH}/aclnn_*.cpp)\n')
+            self.apply_to(cmake_file)
+            first = cmake_file.read_text()
+            self.apply_to(cmake_file)
+            self.assertEqual(cmake_file.read_text(), first)
+            self.assertEqual(first.count("CAM82_PLATFORM_INCLUDE="), 1)
+            self.assertIn('target_include_directories(cust_opapi PRIVATE "${_cam82_platform_include}")', first)
+            self.assertIn('$ENV{ASCEND_HOME_PATH}/include/experiment/platform', first)
+            self.assertNotIn("CPLUS_INCLUDE_PATH", first)
+        docker = (HERE / "Dockerfile").read_text()
+        self.assertIn("apply --check /opt/cam82/umdk-platform-include.patch", docker)
+        self.assertLess(docker.index("CAM82_PLATFORM_INCLUDE_PATCH_OK"), docker.index("BUILD_JOBS=4"))
+        self.assertIn("4.5.4 已定位", (HERE / "README.md").read_text())
+
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("cmake") and shutil.which("c++"),
+                         "Linux CMake/compiler regression (Ascend deployment targets Linux)")
+    def test_host_compile_reproduces_failure_then_uses_sdk_header_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk = root / "mock sdk"
+            platform = sdk / "include/experiment/platform/platform"
+            platform.mkdir(parents=True)
+            (platform / "platform_infos_def.h").write_text('inline int platform_fixture() { return 7; }\n')
+            (platform / "platform_info.h").write_text('#include "platform/platform_infos_def.h"\n')
+            opdev = sdk / "include/aclnn/opdev"
+            opdev.mkdir(parents=True)
+            (opdev / "platform.h").write_text('#include "platform/platform_info.h"\n')
+            project = root / "project"
+            project.mkdir()
+            (project / "api.cpp").write_text('#include "aclnn/opdev/platform.h"\nint api() { return platform_fixture(); }\n')
+            (project / "other.cpp").write_text('int other() { return 1; }\n')
+            cmake_file = project / "CMakeLists.txt"
+            cmake_file.write_text('''cmake_minimum_required(VERSION 3.12)
+project(cam82_header_fixture LANGUAGES CXX)
+set(ASCEND_AUTOGEN_PATH "${CMAKE_SOURCE_DIR}/autogen")
+file(MAKE_DIRECTORY "${ASCEND_AUTOGEN_PATH}")
+file(GLOB aclnn_src ${ASCEND_AUTOGEN_PATH}/aclnn_*.cpp)
+add_library(cust_opapi SHARED api.cpp)
+target_include_directories(cust_opapi PRIVATE "$ENV{ASCEND_HOME_PATH}/include")
+add_library(unrelated OBJECT other.cpp)
+''')
+            env = dict(os.environ, ASCEND_HOME_PATH=str(sdk))
+            configure = [shutil.which("cmake"), "-S", str(project), "-B", str(root / "build"),
+                         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+            build = [shutil.which("cmake"), "--build", str(root / "build"), "--parallel", "2"]
+            subprocess.run(configure, env=env, check=True, capture_output=True, text=True, timeout=45)
+            before = subprocess.run(build, env=env, capture_output=True, text=True, timeout=45)
+            self.assertNotEqual(before.returncode, 0)
+            self.assertIn("platform/platform_info.h", before.stderr)
+            self.apply_to(cmake_file)
+            after_config = subprocess.run(configure, env=env, capture_output=True, text=True, timeout=45)
+            self.assertEqual(after_config.returncode, 0, after_config.stderr)
+            self.assertIn("CAM82_PLATFORM_INCLUDE=", after_config.stdout)
+            after = subprocess.run(build, env=env, capture_output=True, text=True, timeout=45)
+            self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
+            commands = json.loads((root / "build/compile_commands.json").read_text())
+            for item in commands:
+                self.assertEqual("include/experiment/platform" in item["command"],
+                                 Path(item["file"]).name == "api.cpp")
+            (platform / "platform_info.h").unlink()
+            missing = subprocess.run(configure, env=env, capture_output=True, text=True, timeout=45)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("CAM82 missing SDK header", missing.stderr)
 
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")

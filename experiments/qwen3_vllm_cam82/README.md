@@ -23,7 +23,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 | Python / torch / torch_npu | 3.11 / 2.7.1 / 2.7.1.dev20250724 |
 | Mooncake源码 | v0.3.9，`a00f75742469d6cc408bc5393b73c501e92dc74a` |
 | Mooncake构建 | USE_ASCEND=ON（旧HCCL Ascend transport），USE_ASCEND_DIRECT=OFF；仅TE，不建Store |
-| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.3 |
+| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.4 |
 
 版本来源：[官方8.2 Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/Dockerfile)、[配套表](https://github.com/vllm-project/vllm-ascend/blob/v0.22.1rc1/docs/source/community/versioning_policy.md)。旧版本维护/特性有差异；源码/版本保护拒绝不匹配，不取消保护去混装。25.5.2驱动与这组旧用户态软件的实际兼容性还需NPU关口确认。
 
@@ -77,7 +77,7 @@ git -C vendor/Mooncake rev-parse HEAD
 git -C vendor/Mooncake submodule status
 ```
 
-UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.3），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
+UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.4），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
 
 ## 3 权重准备：已有就复用，缺失再下载
 
@@ -113,7 +113,7 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
-**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库已编译成功，pregen前缀和Torch导入问题已越过，但完整算子包和最终镜像尚未构建成功。当前卡点是CANN环境子脚本中的grep遇到set -e提前退出，修正见4.5.3。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
+**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库已编译成功，pregen前缀、Torch导入和CANN环境加载问题已越过，但完整算子包和最终镜像尚未构建成功。当前卡点是cust_opapi缺少平台头文件搜索路径；已确认头文件在固定镜像中，修正见4.5.4。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
 
 ### 4.1 检查宿主机磁盘空间
 
@@ -252,6 +252,30 @@ ls experiments/qwen3_vllm_cam82/patches/umdk-cann-env-guard.patch experiments/qw
 ```
 
 有本地改动先处理。然后重跑4.5的原Docker构建命令，不清缓存、不加`--no-cache`、不重下vendor/基础镜像/权重。预期在补丁标记`CAM82_CANN_ENV_PATCH_OK`之后，单算子构建会输出`CAM82_CANN_ENV_READY`，再输出`run generated build.sh`。这些仅说明越过环境加载，不表示算子或镜像已经构建成功；仍须本次构建最终退出成功且出现Successfully built/tagged，才能进入4.6。CPU回归覆盖了中间grep返回1、SDK最终失败、SDK文件/必要资源缺失及后续编译失败，不替代238上的完整编译和NPU验证。
+
+#### 4.5.4 已定位：cust_opapi编译缺少platform/platform_info.h
+
+238已确认固定基础镜像中存在两个头文件：
+
+```text
+/usr/local/Ascend/ascend-toolkit/latest/include/experiment/platform/platform/platform_info.h
+/usr/local/Ascend/ascend-toolkit/latest/include/experiment/platform/platform/platform_infos_def.h
+```
+
+报错链为pregen的`aclnn_all2_all_detour.cpp → aclnn/opdev/platform.h → platform/platform_info.h`。因此不是头文件包没安装，而是msopgen生成项目的`cust_opapi`未包含这条依赖所需的搜索根目录。要添加的是`$ASCEND_HOME_PATH/include/experiment/platform`：其后拼接`platform/platform_info.h`才对应实际文件，不能直接把最后的`platform`目录也加进根路径。诊断find输出的autofuse符号链接循环与本次编译报错不是同一件事，不要删除这些链接。
+
+新增`patches/umdk-platform-include.patch`，仅在镜像内扩展现有CMake修补函数：保留pregen复制逻辑，并在生成的`op_host/CMakeLists.txt`末尾为`cust_opapi`添加PRIVATE头文件路径；在CMake配置时检查两个头文件存在并输出`CAM82_PLATFORM_INCLUDE=...`。不修改算子算法/API包装，不复制或伪造头文件，不修改CANN包，也不设置影响所有目标的全局`CPLUS_INCLUDE_PATH`。原文件SHA256校验和此前两个补丁仍保留，vendor提交不变。
+
+开发端发布本实验仓库更新后，238宿主机执行：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git status --short --branch
+git pull --ff-only origin feat/qwen3-cam-detour-conflict
+ls experiments/qwen3_vllm_cam82/patches/umdk-platform-include.patch
+```
+
+有本地改动先处理。随后重跑4.5的原Docker构建命令，不清缓存、不重新下载、不更新UMDK分支。应先看到`CAM82_PLATFORM_INCLUDE_PATCH_OK`，进入生成项目的CMake后再看到`CAM82_PLATFORM_INCLUDE=.../include/experiment/platform`。本地CPU回归用真实主机编译器复现了未补路径时的头文件错误，补路径后成功编译模拟库，并检查该路径不影响其他目标、修补可重复执行、头文件缺失仍停止。这不是完整Ascend算子编译成功的证明；仍以238本次Docker构建最终退出成功且出现Successfully built/tagged为准，之后才能进入4.6。
 
 ### 4.6 238保存并传输实验镜像（构建成功后）
 
