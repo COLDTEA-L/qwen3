@@ -1,6 +1,6 @@
 # Qwen3：CANN 8.2 / vLLM 原生 MoE + CAM TP 多路径实验
 
-更新：2026-10-14。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。代码已接入，**未在910B4实机编译/跑通**；每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
+更新：2026-10-15。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。代码已接入，**未在910B4实机编译/跑通**；每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
 
 ## 1 布局、版本与接入边界
 
@@ -113,24 +113,69 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
+**当前进度（2026-10-15）：你已完成4.2–4.4，基础镜像已用crane下载、导入并打上本地标签，arm64及四个包版本已核对。现在从4.5继续；不要重复下载或导入。磁盘空间可按4.1复查，vendor源码尚未准备齐全时先补第2节对应部分。**
+
+### 4.1 检查宿主机磁盘空间
+
 先确认Docker磁盘可容纳新基础镜像、源码编译层和导出tar；之前166GB不是实时保证。不自动删共享容器/镜像、不重启Docker daemon。
 
 ```bash
 df -h /ssd_1/docker /ssd_2/yuanwenliu
 docker system df
-docker pull quay.io/ascend/vllm-ascend@sha256:610df8ee1ba35261cd324e2ecb161710f34a1f0c32875bc454872a8a64291f12
-docker image inspect quay.io/ascend/vllm-ascend@sha256:610df8ee1ba35261cd324e2ecb161710f34a1f0c32875bc454872a8a64291f12 --format '{{.Id}} {{.Architecture}} {{json .RepoDigests}}'
 ```
 
-记录ImageID/RepoDigests，Architecture必须arm64。Docker pull走daemon代理，shell export不保证影响pull。出现代理认证错误需使用获准的daemon代理/镜像获取方式，不把密码落进Dockerfile。
+### 4.2 使用crane下载固定基础镜像（已完成，跳过）
 
-不占卡的基础镜像包查询（不执行Torch import）：
+238的Docker daemon不能直接pull，本流程不再依赖docker pull，改用你已验证可用的crane。crane使用当前shell的联网配置；代理凭据不写进仓库。下面保留你已使用的`--insecure`，它允许非安全的TLS/HTTP获取，仅在获准的可信网络使用，不修改Docker daemon或系统证书设置。已有完整tar且已导入时不重新下载、不覆盖：
 
 ```bash
-docker run --rm --network=none --runtime=runc --entrypoint python quay.io/ascend/vllm-ascend@sha256:610df8ee1ba35261cd324e2ecb161710f34a1f0c32875bc454872a8a64291f12 -m pip show vllm vllm-ascend torch torch-npu | awk '/^(Name|Version):/ {print}'
+/ssd_2/yuanwenliu/tools/crane/crane --insecure pull --platform linux/arm64 --format legacy quay.io/ascend/vllm-ascend@sha256:610df8ee1ba35261cd324e2ecb161710f34a1f0c32875bc454872a8a64291f12 /ssd_2/yuanwenliu/vllm-ascend.tar
 ```
 
-需与第1节一致；不一致就先回传，不花时间继续编译。Dockerfile同样在apt/CAM/Mooncake编译之前检查基础版本与源码指纹。
+crane只保存tar，不会自动把镜像加载进Docker；直接docker inspect远端digest出现No such image不代表tar下载失败。
+
+### 4.3 导入Docker并设置本地标签（已完成，跳过）
+
+```bash
+docker load -i /ssd_2/yuanwenliu/vllm-ascend.tar
+```
+
+本次固定镜像实际输出`Loaded image ID: sha256:3149e4e4e19556fc5cb22c6be9aee3a262f599cdc38cb58f24dfeb47b783e64c`。确认load成功后打标签；若输出不同，先核对，不盲目使用其他镜像：
+
+```bash
+docker tag sha256:3149e4e4e19556fc5cb22c6be9aee3a262f599cdc38cb58f24dfeb47b783e64c qwen3-vllm:cam82-base
+docker image inspect qwen3-vllm:cam82-base --format '{{.Id}} {{.Architecture}}'
+```
+
+已确认ImageID为上面的3149e4e4…，Architecture为arm64。注册表manifest digest和Docker ImageID不是同一概念；tar导入后原来的`仓库@sha256:manifest`引用可能不可用，RepoDigests也可能为空。**后续查询、构建都使用本地标签`qwen3-vllm:cam82-base`，不再用远端digest引用。**
+
+### 4.4 核对基础镜像包版本（已完成，跳过）
+
+下面不联网、不占卡，也不执行Torch import：
+
+```bash
+docker run --rm --network=none --runtime=runc --entrypoint python qwen3-vllm:cam82-base -m pip show vllm vllm-ascend torch torch-npu | awk '/^(Name|Version):/ {print}'
+```
+
+238已回传并核对：
+
+| 包 | 基础镜像实测版本 |
+| --- | --- |
+| vllm | 0.10.2+empty |
+| vllm_ascend | 0.10.2rc1 |
+| torch | 2.7.1+cpu |
+| torch_npu | 2.7.1.dev20250724 |
+
+`+empty`与`+cpu`是这套镜像的包版本后缀，不能据此认定只能在CPU运行；NPU由torch_npu与Ascend运行时提供。适配检查会先去掉`+`后缀再比较版本。以上仅确认架构/包元数据，尚未确认CANN元数据、关键源码指纹或NPU执行；Dockerfile会在apt/CAM/Mooncake编译前继续检查基础版本和源码。
+
+### 4.5 检查vendor源码并构建实验镜像（现在从这里继续）
+
+先在238宿主机确认第2节的三个构建源码已经准备好。任何一个文件缺失，先补第2节vendor准备，不要直接构建：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+ls experiments/qwen3_vllm_cam82/vendor/umdk/build/cam/comm_operator/build_qwen3_all2all_detour.sh experiments/qwen3_vllm_cam82/vendor/Mooncake/CMakeLists.txt experiments/qwen3_vllm_cam82/vendor/yalantinglibs/CMakeLists.txt
+```
 
 Docker build使用已在238 shell中export的代理变量；下面通过变量传参，不在命令中写明密码。支持原来的legacy builder，不用`--progress`。该Dockerfile只加编译依赖、固定Mooncake、CAM和本仓库适配包，不升级Torch/Transformers。构建CAM指定ascend910b4、按当前Torch ABI编译，不复用CANN9产物。
 
@@ -145,13 +190,20 @@ export HTTPS_PROXY="$https_proxy"
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 set -o pipefail
-DOCKER_BUILDKIT=0 docker build --network=host --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg http_proxy --build-arg https_proxy -f experiments/qwen3_vllm_cam82/Dockerfile -t qwen3-vllm:cam82-v1 experiments/qwen3_vllm_cam82 2>&1 | tee /ssd_2/yuanwenliu/cam82-build.log
+DOCKER_BUILDKIT=0 docker build --network=host --build-arg BASE_IMAGE=qwen3-vllm:cam82-base --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg http_proxy --build-arg https_proxy -f experiments/qwen3_vllm_cam82/Dockerfile -t qwen3-vllm:cam82-v1 experiments/qwen3_vllm_cam82 2>&1 | tee /ssd_2/yuanwenliu/cam82-build.log
+```
+
+**必须保留`--build-arg BASE_IMAGE=qwen3-vllm:cam82-base`。** Dockerfile保留固定官方digest作为默认值，但本环境通过参数选择已经导入的本地基础镜像；不加该参数可能再次尝试联网拉取。apt等构建依赖下载仍需要代理，这与不再拉取基础镜像是两件事。
+
+必须本次构建退出成功且看到Successfully built/tagged，才单独执行以下检查、进入4.6；即使旧tag存在，也不能据此认为本次构建成功：
+
+```bash
 docker image inspect qwen3-vllm:cam82-v1 --format '{{.Id}} {{.Architecture}}'
 ```
 
-必须Successfully built/tagged，才进入后续。CANN metadata、源码指纹、库/API或编译不匹配就停止，回传最早错误；不安装最新torch_npu兜底。构建用SDK/devlib编译，不验证设备执行。Mooncake旧HCCL transport与固定CANN的编译/运行是新的关口，不宣称必然通过。
+CANN metadata、源码指纹、库/API或编译不匹配就停止，回传最早错误；不安装最新torch_npu兜底。构建用SDK/devlib编译，不验证设备执行。Mooncake旧HCCL transport与固定CANN的编译/运行是新的关口，不宣称必然通过。
 
-238保存/传镜像：
+### 4.6 238保存并传输实验镜像（构建成功后）
 
 ```bash
 docker save -o /ssd_2/yuanwenliu/qwen3-vllm-cam82-v1.tar qwen3-vllm:cam82-v1
@@ -159,7 +211,7 @@ sha256sum /ssd_2/yuanwenliu/qwen3-vllm-cam82-v1.tar
 scp /ssd_2/yuanwenliu/qwen3-vllm-cam82-v1.tar yuanwenliu@10.155.205.228:/ssd_2/yuanwenliu/
 ```
 
-228核对同一tar校验和，再load：
+### 4.7 228核对、导入实验镜像
 
 ```bash
 sha256sum /ssd_2/yuanwenliu/qwen3-vllm-cam82-v1.tar

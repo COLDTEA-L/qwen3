@@ -174,6 +174,16 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("pip install --upgrade", docker)
         self.assertNotRegex((HERE / "README.md").read_text(), r"git\s+push")
 
+    def test_crane_import_uses_local_base_and_has_resume_step(self):
+        text = (HERE / "README.md").read_text()
+        section = text.split("## 4 238宿主机", 1)[1].split("## 5 ", 1)[0]
+        self.assertIn("### 4.5 检查vendor源码并构建实验镜像（现在从这里继续）", section)
+        self.assertIn("--build-arg BASE_IMAGE=qwen3-vllm:cam82-base", section)
+        self.assertIn("docker load -i /ssd_2/yuanwenliu/vllm-ascend.tar", section)
+        self.assertIn("--entrypoint python qwen3-vllm:cam82-base -m pip show", section)
+        self.assertNotRegex(section, r"(?m)^docker pull ")
+        self.assertNotRegex(section, r"(?m)^docker (?:image inspect|run).*quay\.io/")
+
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")
 class NumericTests(unittest.TestCase):
