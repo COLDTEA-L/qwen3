@@ -23,7 +23,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 | Python / torch / torch_npu | 3.11 / 2.7.1 / 2.7.1.dev20250724 |
 | Mooncake源码 | v0.3.9，`a00f75742469d6cc408bc5393b73c501e92dc74a` |
 | Mooncake构建 | USE_ASCEND=ON（旧HCCL Ascend transport），USE_ASCEND_DIRECT=OFF；仅TE，不建Store |
-| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef` |
+| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的pregen文件名前缀修正，见4.5.2 |
 
 版本来源：[官方8.2 Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/Dockerfile)、[配套表](https://github.com/vllm-project/vllm-ascend/blob/v0.22.1rc1/docs/source/community/versioning_policy.md)。旧版本维护/特性有差异；源码/版本保护拒绝不匹配，不取消保护去混装。25.5.2驱动与这组旧用户态软件的实际兼容性还需NPU关口确认。
 
@@ -77,7 +77,7 @@ git -C vendor/Mooncake rev-parse HEAD
 git -C vendor/Mooncake submodule status
 ```
 
-UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。此轮无须改UMDK源码，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
+UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
 
 ## 3 权重准备：已有就复用，缺失再下载
 
@@ -212,6 +212,27 @@ CANN metadata、源码指纹、库/API或编译不匹配就停止，回传最早
 若遇到这次错误：更新本实验仓库后，**直接重跑4.5原来的docker build命令**；不重新下载基础镜像、vendor或权重，不先做4.6。不要加`--no-cache`或清理已有构建缓存，Docker通常能复用前面成功的层，从修改后的CAM层继续。当前只有基础镜像的导入顺序测试通过，新Dockerfile是否完全编译成功仍要看本轮结果。
 
 不要用`TORCH_DEVICE_BACKEND_AUTOLOAD=0`跳过NPU后端加载来当作修复；它不能证明torch_npu或CAM可用。也不要把其他CANN版本的同名`.so`复制到镜像里。如果新版导入检查仍失败，保留第一个错误和对应构建层，停止后续步骤。
+
+#### 4.5.2 已定位：Missing pregen autogen for aclnn_all_to_all_detour
+
+该报错表示镜像仍未构建成功。`Successfully updated parameters`仅表示中间参数生成成功，不能据此进入4.6。
+
+原因是固定UMDK版本中，算子目录叫`all_to_all_detour`，但已有API文件实际叫`aclnn_all2_all_detour.cpp`和`.h`。单算子构建脚本按目录名拼出`aclnn_all_to_all_detour`，因而找不到文件。这是构建脚本命名映射遗漏，不是少下载依赖，也不是模型权重或显存问题。
+
+本实验仓库新增`patches/umdk-all2all-pregen-prefix.patch`。Dockerfile保留UMDK提交9c0bbdad，先核对原脚本SHA256和两个已有API文件，再检查并应用补丁，只将该算子的查找前缀映射为`aclnn_all2_all_detour`；其他算子、API符号名、算子目录和安装包名称不变。修正仅发生在镜像内的`/opt/umdk-cam82`副本，不改宿主机vendor，不需单独更新GitCode仓库。
+
+开发端发布本实验仓库更新后，在238宿主机执行：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git status --short --branch
+git pull --ff-only origin feat/qwen3-cam-detour-conflict
+ls experiments/qwen3_vllm_cam82/patches/umdk-all2all-pregen-prefix.patch
+```
+
+有本地改动先处理，不强制覆盖。随后**重跑4.5原来的docker build命令**，代理保持可用；不重新下载基础镜像、vendor或权重，不清缓存、不加`--no-cache`。应先看到`CAM82_PREGEN_PREFIX_PATCH_OK`，再继续CAM编译。该标记仅代表补丁应用成功；必须最终本次构建退出成功且看到Successfully built/tagged，才进入4.6。
+
+补丁应用、前缀选择和pregen文件复制已做CPU回归测试，但完整CANN算子编译及NPU执行仍需在238验证。若脚本校验或补丁检查失败，不删除校验绕过，先回传最早错误。
 
 ### 4.6 238保存并传输实验镜像（构建成功后）
 

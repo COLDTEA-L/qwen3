@@ -201,6 +201,43 @@ class PolicyTests(unittest.TestCase):
         self.assertLess(cam_stage.index("CAM82_BUILD_TORCH_IMPORT_OK"), cam_stage.index("BUILD_JOBS=4"))
         self.assertIn("CAM82_NATIVE_IMPORT_OK", docker)
 
+    def test_pregen_patch_maps_only_all2all_and_refuses_reapplication(self):
+        patch_file = HERE / "patches/umdk-all2all-pregen-prefix.patch"
+        original = ('\n# aclnn autogen file prefix: all_gather_detour -> aclnn_all_gather_detour\n'
+                    'ACLN_PREFIX="aclnn_${OP_NAME}"\n\nCopySingleOp() {\n    local dst_dir="$1"\n}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "build/cam/comm_operator/compile_single_op.sh"
+            script.parent.mkdir(parents=True)
+            script.write_text(original)
+            # Outside a repository, git apply still performs normal hunk checks.
+            cmd = ["git", "apply"]
+            subprocess.run(cmd + ["--check", str(patch_file)], cwd=directory, check=True,
+                           capture_output=True, text=True)
+            subprocess.run(cmd + [str(patch_file)], cwd=directory, check=True,
+                           capture_output=True, text=True)
+            text = script.read_text()
+            subprocess.run(["bash", "-n", str(script)], check=True)
+            mapping = text.split("CopySingleOp()", 1)[0]
+            for operator, expected in (("all_to_all_detour", "aclnn_all2_all_detour"),
+                                       ("all_gather_detour", "aclnn_all_gather_detour"),
+                                       ("reduce_scatter_detour", "aclnn_reduce_scatter_detour")):
+                output = subprocess.check_output(["bash", "-c", 'OP_NAME="$1"\n' + mapping +
+                                                   '\nprintf "%s" "$ACLN_PREFIX"', "test", operator], text=True)
+                self.assertEqual(output, expected)
+            result = subprocess.run(cmd + ["--check", str(patch_file)], cwd=directory,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_pregen_patch_is_guarded_and_applied_before_cam_build(self):
+        docker = (HERE / "Dockerfile").read_text()
+        cam_stage = docker.split('RUN test "$(git -C /opt/umdk-cam82', 1)[1].split("COPY check.py", 1)[0]
+        self.assertIn("ce9d1a7821b2956c2b56f6d4f4e8518abf99238676494c6d323dc9f2fca9c889", cam_stage)
+        self.assertIn("git -C /opt/umdk-cam82 apply --check", cam_stage)
+        self.assertIn("aclnn_all2_all_detour.cpp", cam_stage)
+        self.assertIn("aclnn_all2_all_detour.h", cam_stage)
+        self.assertLess(cam_stage.index("CAM82_PREGEN_PREFIX_PATCH_OK"), cam_stage.index("BUILD_JOBS=4"))
+        self.assertIn("4.5.2 已定位", (HERE / "README.md").read_text())
+
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")
 class NumericTests(unittest.TestCase):

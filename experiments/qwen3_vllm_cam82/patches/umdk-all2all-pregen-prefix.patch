@@ -1,0 +1,14 @@
+diff --git a/build/cam/comm_operator/compile_single_op.sh b/build/cam/comm_operator/compile_single_op.sh
+--- a/build/cam/comm_operator/compile_single_op.sh
++++ b/build/cam/comm_operator/compile_single_op.sh
+@@ -72,6 +72,10 @@
+
+ # aclnn autogen file prefix: all_gather_detour -> aclnn_all_gather_detour
+ ACLN_PREFIX="aclnn_${OP_NAME}"
++# All2AllDetour's generated API uses all2_all, unlike its source directory.
++if [ "${OP_NAME}" = "all_to_all_detour" ]; then
++    ACLN_PREFIX="aclnn_all2_all_detour"
++fi
+
+ CopySingleOp() {
+     local dst_dir="$1"
