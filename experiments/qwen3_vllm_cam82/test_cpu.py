@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE / "adapter"))
 from qwen_cam82 import policy
 from qwen_cam82.collectives import CamTP
 from qwen_cam82 import hooks
+from qwen_cam82 import startup
 import launch
 
 try:
@@ -68,6 +69,191 @@ def mock_runtime(exchange):
 
 
 class PolicyTests(unittest.TestCase):
+    @staticmethod
+    def startup_config(role="d8-228"):
+        return NS(model_config=NS(enforce_eager=True, quantization=None, dtype="bfloat16",
+                  hf_config=NS(model_type="qwen3_moe", num_experts=128, num_experts_per_tok=8)),
+                  parallel_config=NS(tensor_parallel_size=4, pipeline_parallel_size=1,
+                    enable_expert_parallel=True, world_size=4, data_parallel_size=2,
+                    data_parallel_size_local=1, data_parallel_rank=0 if role == "d8-228" else 1,
+                    data_parallel_backend="mp", distributed_executor_backend="mp",
+                    worker_cls=startup.WORKER_CLASS))
+
+    @staticmethod
+    def startup_environment(role="d8-228"):
+        base = policy.ROLES[role][1]
+        return {"QWEN_CAM82_ROLE": role, "QWEN_CAM82_MODE": "off",
+                "PHYSICAL_DEVICES": ",".join(str(base + i) for i in range(4))}
+
+    @staticmethod
+    def fake_engine_utils():
+        def get_device_indices():
+            return "0,1,2,3"
+
+        @contextlib.contextmanager
+        def native(vllm_config, local_dp_rank):
+            with patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": get_device_indices()}):
+                yield
+
+        class Manager:
+            def __init__(self):
+                # Same native helper lookup at the process-creation boundary.
+                self.helper_name = "set_device_control_env_var"
+
+        return NS(set_device_control_env_var=native, CoreEngineProcManager=Manager,
+                  current_platform=NS(device_control_env_var="ASCEND_RT_VISIBLE_DEVICES"))
+
+    def test_startup_environment_defaults_and_physical_mapping(self):
+        for role in policy.ROLES:
+            env = {**self.startup_environment(role), "HCCL_INTRA_ROCE_ENABLE": "0",
+                   "HCCL_INTRA_PCIE_ENABLE": "1"}
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(startup.prepare_environment(), (role, "off"))
+                self.assertNotIn("HCCL_INTRA_ROCE_ENABLE", os.environ)
+                self.assertNotIn("HCCL_INTRA_PCIE_ENABLE", os.environ)
+                os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1,2,3"
+                with self.assertRaisesRegex(ValueError, "before process creation"):
+                    startup.prepare_environment()
+                del os.environ["ASCEND_RT_VISIBLE_DEVICES"]
+                os.environ["PHYSICAL_DEVICES"] = "4,5,6,7" if role != "d8-228" else "0,1,2,3"
+                with self.assertRaisesRegex(ValueError, "PHYSICAL_DEVICES"):
+                    startup.prepare_environment()
+
+    def test_dp_mask_is_prevented_before_child_creation_but_other_workers_unchanged(self):
+        for role in ("d8-228", "d8-238"):
+            helper = self.fake_engine_utils()
+            startup.install_dp_visibility_policy(helper)
+            installed = helper.set_device_control_env_var
+            startup.install_dp_visibility_policy(helper)
+            self.assertIs(installed, helper.set_device_control_env_var)
+            cfg = self.startup_config(role)
+            with patch.dict(os.environ, self.startup_environment(role), clear=True):
+                with helper.set_device_control_env_var(cfg, 0):
+                    # A newly created child sees the unmasked environment.
+                    output = subprocess.check_output([sys.executable, "-c",
+                        'import os; print(os.getenv("ASCEND_RT_VISIBLE_DEVICES", "UNSET")); '
+                        'print(os.environ["PHYSICAL_DEVICES"])'], text=True)
+                    self.assertEqual(output.splitlines(), ["UNSET", os.environ["PHYSICAL_DEVICES"]])
+                cfg.parallel_config.worker_cls = "another.worker.Class"
+                with helper.set_device_control_env_var(cfg, 0):
+                    self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "0,1,2,3")
+                self.assertNotIn("ASCEND_RT_VISIBLE_DEVICES", os.environ)
+
+    def test_dp_policy_refuses_unsupported_layouts_and_masked_parent(self):
+        helper = self.fake_engine_utils()
+        startup.install_dp_visibility_policy(helper)
+        with patch.dict(os.environ, self.startup_environment(), clear=True):
+            for field, value in (("data_parallel_size_local", 2), ("world_size", 8),
+                                 ("data_parallel_rank", 1), ("data_parallel_backend", "ray")):
+                cfg = self.startup_config()
+                setattr(cfg.parallel_config, field, value)
+                with self.assertRaisesRegex(RuntimeError, "planned D8"):
+                    with helper.set_device_control_env_var(cfg, 0):
+                        self.fail("Unsupported layout entered")
+            with self.assertRaisesRegex(RuntimeError, "planned D8"):
+                with helper.set_device_control_env_var(self.startup_config(), 1):
+                    self.fail("Unexpected local DP rank entered")
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1,2,3"
+            with self.assertRaisesRegex(ValueError, "before process creation"):
+                with helper.set_device_control_env_var(self.startup_config(), 0):
+                    self.fail("Masked parent entered")
+        helper = self.fake_engine_utils()
+        helper.current_platform.device_control_env_var = "CUDA_VISIBLE_DEVICES"
+        with self.assertRaisesRegex(RuntimeError, "Unsupported"):
+            startup.install_dp_visibility_policy(helper)
+
+    def test_launch_uses_startup_entrypoint_in_all_modes(self):
+        for role in policy.ROLES:
+            for mode in policy.MODES:
+                cmd, env = launch.command(role, mode)
+                self.assertEqual(cmd[1:4], ["-m", "qwen_cam82.entrypoint", "serve"])
+                self.assertEqual(env["QWEN_CAM82_ROLE"], role)
+                self.assertEqual(env["QWEN_CAM82_MODE"], mode)
+
+    def test_hotfix_docs_require_both_installed_packages_and_scoped_git_trust(self):
+        text = (HERE / "README.md").read_text()
+        section = text.split("### 5.1 ", 1)[1].split("## 6 ", 1)[0]
+        self.assertIn("228、238都执行（相同命令，容器内）", section)
+        self.assertIn("--no-deps --no-build-isolation --no-index --force-reinstall", section)
+        self.assertIn("git -c safe.directory=/ssd_2/yuanwenliu/sglang", section)
+        self.assertIn('assert v=="0.1.1"', section)
+        self.assertIn("CAM82_DP_VISIBILITY", section)
+        self.assertIn("CAM82_WORKER_DEVICE", section)
+        self.assertNotIn("--global", section)
+
+    def test_entrypoint_installs_policy_before_running_native_cli(self):
+        from qwen_cam82 import entrypoint
+        events = []
+        names = ("vllm", "vllm.v1", "vllm.v1.engine")
+        modules = {name: ModuleType(name) for name in names}
+        for name, module in modules.items():
+            if "." in name:
+                parent, attr = name.rsplit(".", 1)
+                setattr(modules[parent], attr, module)
+        modules["vllm.v1.engine"].utils = NS()
+        with patch.dict(sys.modules, modules), \
+             patch.dict(os.environ, self.startup_environment(), clear=True), \
+             patch.object(entrypoint, "check_installation", side_effect=lambda: events.append("check")), \
+             patch.object(entrypoint, "install_dp_visibility_policy", side_effect=lambda _: events.append("policy")), \
+             patch.object(entrypoint.runpy, "run_module", side_effect=lambda *a, **kw: events.append((a, kw))):
+            entrypoint.main()
+        self.assertEqual(events[:2], ["check", "policy"])
+        self.assertEqual(events[2], (("vllm.entrypoints.cli.main",), {"run_name": "__main__", "alter_sys": True}))
+
+    def test_actual_worker_keeps_global_rank_and_checks_physical_card(self):
+        class BaseWorker:
+            def __init__(self, vllm_config, local_rank, rank, *args, **kwargs):
+                self.local_rank, self.rank = local_rank, rank
+                self.cfg = vllm_config
+            def init_device(self):
+                current[0] = self.local_rank
+
+        names = ("vllm_ascend", "vllm_ascend.worker", "vllm_ascend.worker.worker_v1",
+                 "vllm", "vllm.distributed", "vllm.distributed.parallel_state")
+        modules = {name: ModuleType(name) for name in names}
+        for name, module in modules.items():
+            if "." in name:
+                parent, attr = name.rsplit(".", 1)
+                setattr(modules[parent], attr, module)
+        modules["vllm_ascend.worker.worker_v1"].NPUWorker = BaseWorker
+        current, ep, count = [None], [8], [8]
+        torch = ModuleType("torch")
+        torch.npu = NS(device_count=lambda: count[0], current_device=lambda: current[0])
+        modules["torch"] = torch
+        pg = modules["vllm.distributed.parallel_state"]
+        pg.get_tp_group = lambda: "tp-group"
+        pg.get_ep_group = lambda: NS(world_size=ep[0])
+        spec = importlib.util.spec_from_file_location("qwen_cam82._worker_test",
+                                                     HERE / "adapter/qwen_cam82/worker.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, modules), patch.object(policy, "check_installation"), \
+             patch("qwen_cam82.collectives.CamTP", side_effect=lambda *args: NS(args=args)), \
+             patch.object(hooks, "install"):
+            spec.loader.exec_module(module)
+            for role in policy.ROLES:
+                ep[0] = 4 if role == "p-228" else 8
+                with patch.dict(os.environ, self.startup_environment(role), clear=True):
+                    for local_rank in range(4):
+                        cfg = self.startup_config(role)
+                        cfg.parallel_config.data_parallel_size = 1 if role == "p-228" else 2
+                        cfg.parallel_config.data_parallel_rank_local = 1
+                        worker = module.QwenCamWorker(cfg, local_rank, 10 + local_rank, "test")
+                        self.assertEqual(worker.local_rank, policy.physical_device(role, local_rank))
+                        self.assertEqual(worker.rank, 10 + local_rank)
+                        self.assertEqual(cfg.parallel_config.data_parallel_rank_local, 0)
+                        worker.init_device()
+                        self.assertEqual(current[0], policy.physical_device(role, local_rank))
+                    count[0] = 4
+                    with self.assertRaisesRegex(RuntimeError, "all8 physical"):
+                        worker.init_device()
+                    count[0] = 8
+                    with patch.object(BaseWorker, "init_device", side_effect=lambda: current.__setitem__(0, 99)):
+                        with self.assertRaisesRegex(RuntimeError, "wrong NPU mapping"):
+                            worker.init_device()
+                    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1,2,3"
+                    with self.assertRaisesRegex(ValueError, "before process creation"):
+                        module.QwenCamWorker(cfg, 0, 0, "test")
+
     def test_physical_roles_no_reindex(self):
         self.assertEqual([policy.physical_device("p-228", i) for i in range(4)], [0, 1, 2, 3])
         self.assertEqual([policy.physical_device("d8-228", i) for i in range(4)], [4, 5, 6, 7])

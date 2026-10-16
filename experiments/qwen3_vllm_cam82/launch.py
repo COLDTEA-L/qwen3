@@ -1,5 +1,6 @@
 """CANN8.2 P4+D8: native Qwen MoE, opt-in CAM TP. CPU-safe dry-run."""
 import argparse
+import importlib.util
 import json
 import os
 import shlex
@@ -25,7 +26,7 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
           "engine_id": "cam82-" + role, "kv_port": 20010 if p else 20040,
           "kv_connector_extra_config": {"use_ascend_direct": False,
               "prefill": {"tp_size": 4, "dp_size": 1}, "decode": {"tp_size": 4, "dp_size": 2}}}
-    cmd = [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model,
+    cmd = [sys.executable, "-m", "qwen_cam82.entrypoint", "serve", model,
            "--served-model-name", "qwen3", "--host", "0.0.0.0", "--port", "30010" if p else "30011",
            "--dtype", "bfloat16", "--tensor-parallel-size", "4", "--enable-expert-parallel",
            "--distributed-executor-backend", "mp", "--worker-cls", "qwen_cam82.worker.QwenCamWorker",
@@ -80,6 +81,8 @@ def main():
         return
     if os.getenv("QWEN_CAM82_HOST") != host or os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error(f"Source cam82/env.sh {host}; do not hide/reindex physical cards")
+    if args.action == "serve" and importlib.util.find_spec("qwen_cam82.entrypoint") is None:
+        parser.error("Installed CAM82 adapter is old. Follow README 5.1 to install adapter 0.1.1 offline in BOTH containers")
     from qwen_cam82.policy import check_installation
     check_installation()
     os.execvpe(cmd[0], cmd, {**os.environ, **env})

@@ -1,6 +1,6 @@
-import os
 from vllm_ascend.worker.worker_v1 import NPUWorker
-from .policy import ROLES, MODES, check_installation, physical_device, validate_config
+from .policy import ROLES, check_installation, physical_device, validate_config
+from .startup import prepare_environment
 
 
 class QwenCamWorker(NPUWorker):
@@ -8,11 +8,11 @@ class QwenCamWorker(NPUWorker):
                  is_driver_worker=False, **kwargs):
         check_installation()
         validate_config(vllm_config)
-        role = os.environ.get("QWEN_CAM82_ROLE", "")
-        mode = os.environ.get("QWEN_CAM82_MODE", "off")
-        if mode not in MODES or role not in ROLES or os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
-            raise ValueError("Explicit role/mode and full physical visibility required")
+        # Still reject a masked worker; the parent must prevent DP masking
+        # before spawning it, not unset the variable after importing NPU code.
+        role, mode = prepare_environment()
         self.cam_role, self.cam_mode = role, mode
+        self.cam_physical_device = physical_device(role, local_rank)
         if vllm_config.parallel_config.data_parallel_size_local != 1:
             raise ValueError("One local DP instance per engine is required")
         # This old connector indexes PHYSICAL_DEVICES by LOCAL DP rank, not the
@@ -20,11 +20,20 @@ class QwenCamWorker(NPUWorker):
         vllm_config.parallel_config.data_parallel_rank_local = 0
         # Leave all eight NPUs visible to CAM. Adjust worker local device without
         # altering global TP/DP ranks; no inference worker is started on relays.
-        super().__init__(vllm_config, physical_device(role, local_rank), rank,
+        super().__init__(vllm_config, self.cam_physical_device, rank,
                          distributed_init_method, is_driver_worker, **kwargs)
 
     def init_device(self):
+        import torch
+        if torch.npu.device_count() != 8:
+            raise RuntimeError("CAM82 requires all8 physical NPUs in each worker")
         super().init_device()
+        expected = self.cam_physical_device
+        actual = torch.npu.current_device()
+        if actual != expected:
+            raise RuntimeError(f"CAM82 wrong NPU mapping: expected physical={expected}, actual={actual}")
+        print(f"CAM82_WORKER_DEVICE role={self.cam_role} mode={self.cam_mode} "
+              f"physical={actual} all8_visible=True", flush=True)
         from vllm.distributed.parallel_state import get_tp_group, get_ep_group
         from .collectives import CamTP
         from .hooks import install

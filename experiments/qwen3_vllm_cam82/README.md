@@ -389,7 +389,7 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 新脚本同时将`${ASCEND_OPP_PATH}/vendors/CAM`加入`ASCEND_CUSTOM_OPP_PATH`，将其`op_api/lib`目录加入`LD_LIBRARY_PATH`，并保持toolkit运行库优先。原因是CAM扩展运行时按文件名`libcust_opapi.so`加载API；仅在构建时按绝对路径加载通过，不代表运行时能够找到。缺少该配置时，会在第一次CAM调用报`aclnnAll2AllDetour ... not in libopapi.so`，即使`CamCommInit`已经成功。
 
-**本次只改宿主机挂载的环境脚本和文档，不改算子二进制或适配包；两机更新实验仓库后，在各自容器的新窗口重新source即可，不需要重建、重新传输镜像。** 更新前的已运行进程不会自动改变环境。
+此前针对第6节probe的环境脚本修正，只需重新source，不改算子二进制。**但如果已经进入第7节并遇到D的`Explicit role/mode and full physical visibility required`，必须先执行下方5.1，将两机容器中的Python适配包更新到0.1.1；仅拉仓库或重新source不足以修复这个模型启动问题。** 已运行进程不会自动改变环境或重新加载代码。
 
 适配包在镜像里安装，不会仅因宿主机拉新代码而自动更新。后续纯Python修订可在新CAM82容器内离线执行`python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm_cam82/adapter`，记录HEAD并重跑关口；涉及CAM/CANN/native库版本变化必须重新构建镜像。不把适配包安装到旧CANN9/SGLang容器。
 
@@ -398,6 +398,58 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 ```bash
 for i in 0 1 2 3 4 5 6 7; do /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -ip -g; /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -link -g; done
 ```
+
+### 5.1 已有镜像的模型启动修复：两机离线更新Python适配包
+
+适用实测：两机镜像内仍是`site-packages/qwen_cam82/worker.py`旧版本；228的P在创建MoE HCCL通信域时报EI0001环境变量错误，D在worker构造阶段被完整物理可见性检查拒绝。`vllm._C`启动WARNING及`Engine core initialization failed`并非这两处根因，不因此重新安装vLLM/Torch/CANN。
+
+修复逻辑：P/D都经`qwen_cam82.entrypoint`进入原生vLLM CLI，在导入CLI/创建引擎前清除两个HCCL机内覆盖变量。D通过只针对本实验worker和D8/TP4/localDP1布局的进程内适配，在父进程创建DP引擎前阻止自动裁卡；不是在已导入NPU代码的worker内临时unset设备变量。其他worker仍用原生逻辑，原vLLM文件不改写，版本/源码保护保留。worker仍拒绝设备被裁剪，检查8卡可见及当前物理卡，并按角色选择228 P=0–3、228 D=4–7、238 D=0–3。MoE并行域、KV transport、CAM算子二进制不变；该修复需两机实际模型启动验收，CPU/mock测试不代表模型已跑通。
+
+先在各服务前台窗口正常结束自己的proxy/P/D，若在CAM模式则等通信停止后再退出238 relay，确认自己的worker已退出。不要在模型仍运行时覆盖包，不停止他人任务。不需要重建、重新传输镜像，不需要重新编译算子或下载权重。
+
+**228、238都执行（相同命令，宿主机或当前挂载仓库的容器内二选一）：** 联网代理按需先准备；如果Git status显示自己的本地修改，先处理再拉取，不覆盖。下面的`safe.directory`只对本次Git命令信任这个明确目录，用于容器root与宿主机属主不同触发的`dubious ownership`；不设全局通配符、不chown仓库：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
+git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
+git -c safe.directory=/ssd_2/yuanwenliu/sglang rev-parse HEAD
+```
+
+**228、238都执行（相同命令，宿主机新窗口）：** 已在正确容器内则不重复进入：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+```
+
+**228、238都执行（相同命令，容器内）：** 仅安装本地纯Python适配包，`--no-deps`不改动推理依赖，`--no-index`不联网：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
+python -c 'import importlib.metadata as m, importlib.util as u; v=m.version("qwen-vllm-cam82"); print("CAM82_ADAPTER_VERSION", v); assert v=="0.1.1"; print("CAM82_ENTRYPOINT", u.find_spec("qwen_cam82.entrypoint").origin)'
+```
+
+仅228，容器内：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+```
+
+仅238，容器内：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+```
+
+**228、238都执行（相同命令，容器内，完成各自source之后）：**
+
+```bash
+python experiments/qwen3_vllm_cam82/check.py --device --model
+python experiments/qwen3_vllm_cam82/test_cpu.py
+```
+
+均通过后，228已通过的第6节probe不必因纯Python启动修复重测；238若仍未通过第6节，先完成它。然后按第7节的完整窗口命令重新开始off基线，保留新时间戳日志，不能拿旧`p-off-20261016-030626.log`代替新一轮结果。每个P/D入口应输出`CAM82_STARTUP_READY ... HCCL_intra_overrides=unset`；两处D还应输出`CAM82_DP_VISIBILITY ... all8_visible=True`。各worker应输出`CAM82_WORKER_DEVICE`，核对物理卡：228 P为0/1/2/3，228 D为4/5/6/7，238 D为0/1/2/3。缺少标记、卡号不符或有新异常时停止后续请求，回传该轮首个实际异常；不取消保护硬跑。
 
 ## 6 先验收CAM三种TP语义，再启动模型
 
