@@ -23,7 +23,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 | Python / torch / torch_npu | 3.11 / 2.7.1 / 2.7.1.dev20250724 |
 | Mooncake源码 | v0.3.9，`a00f75742469d6cc408bc5393b73c501e92dc74a` |
 | Mooncake构建 | USE_ASCEND=ON（旧HCCL Ascend transport），USE_ASCEND_DIRECT=OFF；仅TE，不建Store |
-| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的构建脚本修正，见4.5.2–4.5.5 |
+| CAM源码 | GitCode `yuanwenliu/umdk`，分支`feat/qwen3-cam-detour-build`，`9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef`；镜像内额外应用本实验仓库的修正，见4.5.2–4.5.6 |
 
 版本来源：[官方8.2 Dockerfile](https://github.com/vllm-project/vllm-ascend/blob/v0.10.2rc1/Dockerfile)、[配套表](https://github.com/vllm-project/vllm-ascend/blob/v0.22.1rc1/docs/source/community/versioning_policy.md)。旧版本维护/特性有差异；源码/版本保护拒绝不匹配，不取消保护去混装。25.5.2驱动与这组旧用户态软件的实际兼容性还需NPU关口确认。
 
@@ -77,7 +77,7 @@ git -C vendor/Mooncake rev-parse HEAD
 git -C vendor/Mooncake submodule status
 ```
 
-UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的构建脚本补丁（见4.5.2–4.5.5），不改宿主机vendor或算子实现，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
+UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开发端发布已有CAM分支，再在实验机拉取；不使用228上旧UMDK混编。不需手工修改或更新已固定版本的vendor/umdk：Dockerfile会只在镜像内对其副本应用本实验仓库的修正（见4.5.2–4.5.6），包括构建辅助脚本及CAM主机侧IPv4校验，不改宿主机vendor或通信算子算法，也无须下载MoE Dispatch/Combine专用算子。vendor被Git忽略，不带运行私有配置。
 
 ## 3 权重准备：已有就复用，缺失再下载
 
@@ -113,7 +113,7 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
-**当前进度（2026-10-16）：你已完成4.2–4.4，基础镜像及vendor已准备好；CAM通信库及算子.run包已编译生成，头文件路径问题已越过，但安装和最终镜像尚未完成。当前卡点是安装命令误用了该自定义算子包不支持的--install参数，修正见4.5.5。更新本实验仓库后重跑4.5；不要重复下载或导入。磁盘空间可按4.1复查。**
+**当前进度（2026-10-16）：238已完成算子包及wheel的编译安装，最终导入CAM扩展时bad_alloc，整套8.2镜像仍未构建成功。已在开发服务器cam_lyw_dev_85容器复现并修正通信库加载时的全局正则问题，同时修正遗漏的inner API编译源；8.5环境的内核、.run、wheel、扩展导入和API库加载均已验证。详见4.5.6及DEV85_VALIDATION.md。按用户要求不清理磁盘、不构建开发机整套8.2镜像；8.5产物不能直接用于238的8.2/Torch2.7环境。238更新源码后仍从4.5构建，不重下基础镜像或vendor。**
 
 ### 4.1 检查宿主机磁盘空间
 
@@ -264,7 +264,7 @@ ls experiments/qwen3_vllm_cam82/patches/umdk-cann-env-guard.patch experiments/qw
 
 报错链为pregen的`aclnn_all2_all_detour.cpp → aclnn/opdev/platform.h → platform/platform_info.h`。因此不是头文件包没安装，而是msopgen生成项目的`cust_opapi`未包含这条依赖所需的搜索根目录。要添加的是`$ASCEND_HOME_PATH/include/experiment/platform`：其后拼接`platform/platform_info.h`才对应实际文件，不能直接把最后的`platform`目录也加进根路径。诊断find输出的autofuse符号链接循环与本次编译报错不是同一件事，不要删除这些链接。
 
-新增`patches/umdk-platform-include.patch`，仅在镜像内扩展现有CMake修补函数：保留pregen复制逻辑，并在生成的`op_host/CMakeLists.txt`末尾为`cust_opapi`添加PRIVATE头文件路径；在CMake配置时检查两个头文件存在并输出`CAM82_PLATFORM_INCLUDE=...`。不修改算子算法/API包装，不复制或伪造头文件，不修改CANN包，也不设置影响所有目标的全局`CPLUS_INCLUDE_PATH`。原文件SHA256校验和此前两个补丁仍保留，vendor提交不变。
+新增`patches/umdk-platform-include.patch`，仅在镜像内扩展现有CMake修补函数：保留pregen复制逻辑，并在生成的`op_host/CMakeLists.txt`末尾为`cust_opapi`添加PRIVATE头文件路径；在当前SDK下依次检查`include/experiment/platform`（8.2实测）和`include`（8.5实测），要求两个头文件都存在并输出`CAM82_PLATFORM_INCLUDE=...`。后续验证还补齐该目标的`aclnnInner_*.cpp`编译源，见4.5.6。不修改算子算法/API包装，不复制或伪造头文件，不修改CANN包，也不设置影响所有目标的全局`CPLUS_INCLUDE_PATH`。原文件SHA256校验和此前两个补丁仍保留，vendor提交不变。
 
 开发端发布本实验仓库更新后，238宿主机执行：
 
@@ -291,6 +291,8 @@ bash "${packages[0]}" --quiet --nox11 --install-path="${ASCEND_OPP_PATH}"
 
 安装命令成功后，脚本还检查`vendors/CAM/op_api/lib/libcust_opapi.so`及`vendors/CAM/op_api/include/aclnn_all2_all_detour.h`均非空，才输出`CAM82_OP_PACKAGE_INSTALLED`并继续构建Python wheel。安装返回非零或缺少必要文件都会立即停止，不把“打印Usage”或只解压文件视为成功。此修正只改镜像内固定UMDK副本的构建辅助脚本，不改宿主机或CANN原文件，也不需要发布新的UMDK分支。
 
+开发容器隔离验证时可另外指定`CAM_OPP_INSTALL_PATH`，安装位置改为该目录下的`vendors/CAM`，避免覆盖已有CAM安装；不设置该变量时仍使用上述`ASCEND_OPP_PATH`。隔离安装后，调用时要设置对应`ASCEND_CUSTOM_OPP_PATH`和API库路径，具体已验证命令见DEV85_VALIDATION.md。
+
 开发端发布本实验仓库更新后，238宿主机执行：
 
 ```bash
@@ -301,6 +303,22 @@ ls experiments/qwen3_vllm_cam82/patches/umdk-op-package-install.patch
 ```
 
 有本地改动先处理。随后重跑4.5的原Docker构建命令。不要清缓存或重新下载；失败的RUN层会重新执行其中的编译与安装步骤，前面成功层仍可复用。先看到补丁标记`CAM82_OP_INSTALL_PATCH_OK`，再检查实际安装后的`CAM82_OP_PACKAGE_INSTALLED`；这两条仍不表示wheel或最终镜像已完成。安装流程的CPU模拟回归已覆盖参数传递、安装失败、返回成功但文件缺失的情况；真实.run安装、后续wheel及最终导入仍需238验证。只有本次构建退出成功且出现Successfully built/tagged，才能进入4.6。
+
+#### 4.5.6 已定位并在8.5容器修正：CAM导入bad_alloc与inner API缺失
+
+238已确认Torch、torch_npu导入成功，CAM扩展导入崩溃；Torch、libcam及扩展均使用CXX11 ABI=1，容器无实际内存限额。该结果不能据此改成ABI=0，也不能把问题归因于32GB HBM容量。Mooncake尚未执行到。
+
+在8.146.225.22实际容器`cam_lyw_dev_85`（CANN8.5、Python3.11.15、Torch2.8.0+cpu、torch_npu2.8.0.post2）中，单独dlopen新编译的libcam也复现同类崩溃。GDB调用栈显示全局`std::regex ipv4_regex`在动态库加载时构造，经正则编译、字符串赋值走到一次约247TB的异常分配请求并抛出bad_alloc。定位到了失败位置，但未据此断言究竟是哪一个底层运行库存在更深层的兼容性问题。
+
+新增`patches/umdk-ipv4-no-static-regex.patch`：移除这处全局正则和regex依赖，IPv4校验改成无动态分配的逐字符检查，保留原规则：4段十进制数、每段1–3位、值0–255、允许前导零、不接受空段/符号/其他字符。通信算法、数据布局、选路策略及Torch ABI不变。原regex与新实现的Linux C++等价回归覆盖54,107个用例，避免简单使用inet_pton改变前导零规则。
+
+扩展加载恢复后，又在主动加载`libcust_opapi.so`时发现`aclnnInnerAll2AllDetour`未定义。自动生成的inner源文件存在，但模板`aclnn_*.cpp`通配符没有包含`aclnnInner_*.cpp`；只生成.so或只import扩展不能发现这个错误。现已扩展现有CMake补丁，把inner源文件一起编译链接，重新打包安装，并检查内外两组All2AllDetour符号均已定义。
+
+新增`build_helpers/verify_cam_import.py`：逐个打印Torch/NPU/CAM导入阶段，检查5个CAM接口的dispatcher schema，再加载实际安装的算子API库并检查两项外部aclnn入口。Dockerfile最终RUN也执行此检查；成功输出`CAM_IMPORT_AND_API_PASS (no NPU execution)`后仍继续原有Mooncake等导入检查，而非绕过原生模块验证。
+
+开发机已生成并验证的产物、日志、环境和复验命令见[8.5算子验证记录](DEV85_VALIDATION.md)。**这些产物不是8.2可用性的认证，也不是NPU多卡通信实测，不要直接复制8.5 wheel/.run到238。** 用户当前要求仅编译算子，未清理服务器已有数据，也未在开发机构建完整8.2镜像。
+
+开发端发布本实验仓库更新后，238宿主机更新实验分支，确认包含`patches/umdk-ipv4-no-static-regex.patch`和`build_helpers/verify_cam_import.py`，再重跑4.5原Docker构建命令。无需更新vendor的9c0bbdad提交或重新下载模型；仍以238本次构建退出成功且最终出现Successfully built/tagged为准，之后才能进入4.6。
 
 ### 4.6 238保存并传输实验镜像（构建成功后）
 

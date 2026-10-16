@@ -28,6 +28,7 @@ COPY patches/umdk-all2all-pregen-prefix.patch /opt/cam82/umdk-all2all-pregen-pre
 COPY patches/umdk-cann-env-guard.patch /opt/cam82/umdk-cann-env-guard.patch
 COPY patches/umdk-platform-include.patch /opt/cam82/umdk-platform-include.patch
 COPY patches/umdk-op-package-install.patch /opt/cam82/umdk-op-package-install.patch
+COPY patches/umdk-ipv4-no-static-regex.patch /opt/cam82/umdk-ipv4-no-static-regex.patch
 COPY build_helpers/source_cann_env_compat.sh /opt/umdk-cam82/build/cam/comm_operator/source_cann_env_compat.sh
 RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5cdf2d5d2fce92ef && \
     test "$(sha256sum /opt/umdk-cam82/build/cam/comm_operator/compile_single_op.sh | cut -d ' ' -f1)" = ce9d1a7821b2956c2b56f6d4f4e8518abf99238676494c6d323dc9f2fca9c889 && \
@@ -46,6 +47,9 @@ RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5c
     git -C /opt/umdk-cam82 apply --check /opt/cam82/umdk-op-package-install.patch && \
     git -C /opt/umdk-cam82 apply /opt/cam82/umdk-op-package-install.patch && \
     echo CAM82_OP_INSTALL_PATCH_OK && \
+    git -C /opt/umdk-cam82 apply --check /opt/cam82/umdk-ipv4-no-static-regex.patch && \
+    git -C /opt/umdk-cam82 apply /opt/cam82/umdk-ipv4-no-static-regex.patch && \
+    echo CAM82_IPV4_NO_STATIC_REGEX_PATCH_OK && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/aarch64-linux/devlib" && \
@@ -55,10 +59,12 @@ RUN test "$(git -C /opt/umdk-cam82 rev-parse HEAD)" = 9c0bbdadfcfe882426cabdce5c
     python -m pip install --no-deps --no-index "${wheels[0]}" && \
     install -m 755 /opt/umdk-cam82/output/cam/qwen3-all2all/comm-build/libcam.so /usr/local/lib/libcam.so && ldconfig
 COPY check.py /opt/cam82/check.py
+COPY build_helpers/verify_cam_import.py /opt/cam82/verify_cam_import.py
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/aarch64-linux/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/aarch64-linux/devlib" && \
     python /opt/cam82/check.py && \
+    python -u /opt/cam82/verify_cam_import.py && \
     python -c 'import torch, torch_npu, umdk_cam_op_lib; from mooncake.engine import TransferEngine; print("CAM82_NATIVE_IMPORT_OK", torch.__version__, torch_npu.__version__)' && \
     python -m pip freeze > /opt/cam82/packages.txt
 WORKDIR /ssd_2/yuanwenliu/sglang

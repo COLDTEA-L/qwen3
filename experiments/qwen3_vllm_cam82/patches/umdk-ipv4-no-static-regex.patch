@@ -1,0 +1,55 @@
+diff --git a/src/cam/comm_operator/framework/tools/socket/cam_socket_exchange.cpp b/src/cam/comm_operator/framework/tools/socket/cam_socket_exchange.cpp
+--- a/src/cam/comm_operator/framework/tools/socket/cam_socket_exchange.cpp
++++ b/src/cam/comm_operator/framework/tools/socket/cam_socket_exchange.cpp
+@@ -13,7 +13,6 @@
+ #include <csignal>
+ #include <cerrno>
+ #include <cstring>
+-#include <regex>
+ #include <set>
+ #include <string>
+ #include <fstream>
+@@ -33,14 +32,35 @@
+ constexpr const char *LOCAL_DEFAULT_LISTEN_IP = "127.0.0.1";
+ constexpr uint16_t LOCAL_DEFAULT_LISTEN_PORT = 10067;
+ constexpr uint32_t MAX_LISTEN_BACK_LOG = 65535;
+-static const std::regex ipv4_regex(
+-    R"(^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)",
+-    std::regex::optimize
+-);
+-
+-bool Ipv4IsValid(const std::string& ip) {
+-    return std::regex_match(ip, ipv4_regex);
+-}
++// Keep IPv4 validation allocation-free: a global std::regex constructor can
++// fail while CAM is dlopened alongside the Torch/CANN C++ runtimes.
++// Match the previous rule, including decimal octets with leading zeroes.
++bool Ipv4IsValid(const std::string& ip) {
++    unsigned int dots = 0;
++    unsigned int value = 0;
++    unsigned int digits = 0;
++    for (const char ch : ip) {
++        if (ch >= '0' && ch <= '9') {
++            if (++digits > 3) {
++                return false;
++            }
++            value = value * 10 + static_cast<unsigned int>(ch - '0');
++            if (value > 255) {
++                return false;
++            }
++        } else if (ch == '.') {
++            if (digits == 0 || dots == 3) {
++                return false;
++            }
++            ++dots;
++            value = 0;
++            digits = 0;
++        } else {
++            return false;
++        }
++    }
++    return dots == 3 && digits != 0;
++}
+
+ int ParseIpAndPort(const char *input, string &ip, uint16_t &port)
+ {

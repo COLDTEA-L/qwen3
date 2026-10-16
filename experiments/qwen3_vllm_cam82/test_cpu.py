@@ -1,5 +1,6 @@
 """CPU/mock regressions. Numeric tests use NumPy, never Torch or an NPU."""
 import contextlib
+import ctypes
 import importlib.util
 import io
 import json
@@ -327,7 +328,7 @@ class OpPackageInstallTests(unittest.TestCase):
         revised = "\n".join(line[1:] for line in hunk if line.startswith(("+", " ")))
         return revised[revised.index("# msopgen"):].split("export CAM_COMM_PATH", 1)[0]
 
-    def run_installation(self, mode="ok"):
+    def run_installation(self, mode="ok", custom_prefix=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = root / "custom op.run"
@@ -353,14 +354,18 @@ if [ "$CAM82_TEST_MODE" != no-header ]; then
 fi
 ''')
             opp = root / "mock opp"
+            destination = root / "isolated opp" if custom_prefix else opp
             args_file = root / "installer-args.txt"
             env = dict(os.environ, CAM82_TEST_ARGS=str(args_file), CAM82_TEST_MODE=mode,
-                       CAM82_TEST_EXPECTED_OPP=str(opp))
+                       CAM82_TEST_EXPECTED_OPP=str(destination))
+            env.pop("CAM_OPP_INSTALL_PATH", None)
+            if custom_prefix: env["CAM_OPP_INSTALL_PATH"] = str(destination)
             script = ('set -euo pipefail\npackages=("$1")\nexport ASCEND_OPP_PATH="$2"\n' +
                       self.installation_stage() + '\necho WHEEL_STAGE_REACHED\n')
             result = subprocess.run(["/bin/bash", "-c", script, "test", str(package), str(opp)],
                                     env=env, capture_output=True, text=True, timeout=15)
-            return result, args_file.read_text().splitlines(), str(opp)
+            if custom_prefix: self.assertFalse(opp.exists(), "Do not overwrite the SDK OPP")
+            return result, args_file.read_text().splitlines(), str(destination)
 
     def test_supported_arguments_install_into_current_opp(self):
         result, args, opp = self.run_installation()
@@ -377,6 +382,11 @@ fi
                 self.assertNotIn("CAM82_OP_PACKAGE_INSTALLED", result.stdout)
                 self.assertNotIn("WHEEL_STAGE_REACHED", result.stdout)
                 if mode != "fail": self.assertIn("required API files are missing", result.stderr)
+
+    def test_installation_can_use_an_isolated_prefix(self):
+        result, args, destination = self.run_installation(custom_prefix=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(args[-1], "--install-path=" + destination)
 
     def test_install_patch_is_guarded_and_applied_before_build(self):
         docker = (HERE / "Dockerfile").read_text()
@@ -444,6 +454,10 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/pregen/build_out/autogen")
             (opdev / "platform.h").write_text('#include "platform/platform_info.h"\n')
             project = root / "project"
             project.mkdir()
+            autogen = project / "autogen"
+            autogen.mkdir()
+            (autogen / "aclnn_fake.cpp").write_text('extern "C" int fixture_inner();\nextern "C" int fixture_wrapper() { return fixture_inner(); }\n')
+            (autogen / "aclnnInner_fake.cpp").write_text('extern "C" int fixture_inner() { return 42; }\n')
             (project / "api.cpp").write_text('#include "aclnn/opdev/platform.h"\nint api() { return platform_fixture(); }\n')
             (project / "other.cpp").write_text('int other() { return 1; }\n')
             cmake_file = project / "CMakeLists.txt"
@@ -452,7 +466,7 @@ project(cam82_header_fixture LANGUAGES CXX)
 set(ASCEND_AUTOGEN_PATH "${CMAKE_SOURCE_DIR}/autogen")
 file(MAKE_DIRECTORY "${ASCEND_AUTOGEN_PATH}")
 file(GLOB aclnn_src ${ASCEND_AUTOGEN_PATH}/aclnn_*.cpp)
-add_library(cust_opapi SHARED api.cpp)
+add_library(cust_opapi SHARED api.cpp ${aclnn_src})
 target_include_directories(cust_opapi PRIVATE "$ENV{ASCEND_HOME_PATH}/include")
 add_library(unrelated OBJECT other.cpp)
 ''')
@@ -471,13 +485,94 @@ add_library(unrelated OBJECT other.cpp)
             after = subprocess.run(build, env=env, capture_output=True, text=True, timeout=45)
             self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
             commands = json.loads((root / "build/compile_commands.json").read_text())
+            self.assertIn("aclnnInner_fake.cpp", [Path(item["file"]).name for item in commands])
             for item in commands:
                 self.assertEqual("include/experiment/platform" in item["command"],
-                                 Path(item["file"]).name == "api.cpp")
-            (platform / "platform_info.h").unlink()
+                                 Path(item["file"]).name != "other.cpp")
+            native = ctypes.CDLL(str(root / "build/libcust_opapi.so"))
+            self.assertEqual(native.fixture_wrapper(), 42)
+            # CANN8.5 places the same platform headers directly below include/.
+            platform85 = sdk / "include/platform"
+            platform85.mkdir()
+            for name in ("platform_info.h", "platform_infos_def.h"):
+                shutil.move(str(platform / name), str(platform85 / name))
+            layout85 = subprocess.run(configure, env=env, capture_output=True, text=True, timeout=45)
+            self.assertEqual(layout85.returncode, 0, layout85.stderr)
+            self.assertIn("CAM82_PLATFORM_INCLUDE=" + str(sdk / "include"), layout85.stdout)
+            subprocess.run(build, env=env, check=True, capture_output=True, text=True, timeout=45)
+            (platform85 / "platform_info.h").unlink()
             missing = subprocess.run(configure, env=env, capture_output=True, text=True, timeout=45)
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("CAM82 missing SDK header", missing.stderr)
+
+
+class Ipv4ValidationTests(unittest.TestCase):
+    def function(self):
+        lines = (HERE / "patches/umdk-ipv4-no-static-regex.patch").read_text().splitlines()
+        return "\n".join(line[1:] for line in lines if line.startswith("+") and not line.startswith("+++"))
+
+    def test_no_static_regex_and_build_wiring(self):
+        text = (HERE / "patches/umdk-ipv4-no-static-regex.patch").read_text()
+        self.assertIn("-static const std::regex ipv4_regex(", text)
+        self.assertNotIn("std::regex", self.function().split("bool Ipv4IsValid", 1)[1])
+        docker = (HERE / "Dockerfile").read_text()
+        self.assertIn("apply --check /opt/cam82/umdk-ipv4-no-static-regex.patch", docker)
+        self.assertLess(docker.index("CAM82_IPV4_NO_STATIC_REGEX_PATCH_OK"), docker.index("BUILD_JOBS=4"))
+
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("c++"), "Linux C++ regression")
+    def test_cpp_parser_matches_previous_regex(self):
+        source = r'''#include <regex>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <random>
+''' + self.function() + r'''
+int main() {
+    const std::regex original(R"(^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)", std::regex::optimize);
+    size_t cases = 0;
+    auto check = [&](const std::string& ip) {
+        ++cases;
+        if (Ipv4IsValid(ip) != std::regex_match(ip, original)) {
+            std::cerr << "IPv4 mismatch: " << ip << std::endl;
+            return false;
+        }
+        return true;
+    };
+    for (int field = 0; field != 4; ++field) {
+        for (int n = 0; n < 10000; ++n) {
+            std::vector<std::string> v{"001", "2", "03", "255"};
+            v[field] = std::to_string(n);
+            if (!check(v[0]+"."+v[1]+"."+v[2]+"."+v[3])) return 1;
+        }
+        for (int n = 0; n < 256; ++n) {
+            for (int width = 1; width != 5; ++width) {
+                std::vector<std::string> v{"0", "1", "254", "255"};
+                v[field] = std::to_string(n);
+                while (v[field].size() < static_cast<size_t>(width)) v[field] = "0" + v[field];
+                if (!check(v[0]+"."+v[1]+"."+v[2]+"."+v[3])) return 1;
+            }
+        }
+    }
+    const std::vector<std::string> invalid{"", ".", "...", "1.2.3", "1.2.3.4.5", "1..2.3", "1.2.3.", "1.2.3.4\n", " 1.2.3.4", "+1.2.3.4", std::string("1.2.3.4\0", 8)};
+    for (const auto& ip : invalid) if (!check(ip)) return 1;
+    std::mt19937 gen(20261016);
+    const std::string chars = "0123456789.a:+- \t\n";
+    for (int n = 0; n < 10000; ++n) {
+        std::string ip;
+        for (unsigned i = 0, len = gen() % 40; i < len; ++i) ip += chars[gen() % chars.size()];
+        if (!check(ip)) return 1;
+    }
+    std::cout << "IPV4_REGEX_EQUIVALENCE_PASS cases=" << cases << std::endl;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "check.cpp"
+            binary = Path(directory) / "check"
+            path.write_text(source)
+            subprocess.run([shutil.which("c++"), "-std=c++14", "-O2", "-D_GLIBCXX_USE_CXX11_ABI=1",
+                            str(path), "-o", str(binary)], check=True, capture_output=True, text=True, timeout=45)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=30)
+            self.assertIn("IPV4_REGEX_EQUIVALENCE_PASS cases=", result.stdout)
 
 
 @unittest.skipIf(np is None, "Numeric mock tests require NumPy (already in inference image)")

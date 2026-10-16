@@ -1,7 +1,7 @@
 diff --git a/build/cam/comm_operator/compile_single_op.sh b/build/cam/comm_operator/compile_single_op.sh
 --- a/build/cam/comm_operator/compile_single_op.sh
 +++ b/build/cam/comm_operator/compile_single_op.sh
-@@ -119,12 +119,27 @@
+@@ -119,12 +119,33 @@
  endif()
  """
 -if insert.strip() in text:
@@ -19,15 +19,21 @@ diff --git a/build/cam/comm_operator/compile_single_op.sh b/build/cam/comm_opera
 +    else:
 +        print(f"[compile_single_op] warning: cannot find aclnn source glob marker in {cmake_file}; prepending pregen copy block")
 +        text = insert + "\n" + text
++inner_marker = 'file(GLOB aclnn_src ${ASCEND_AUTOGEN_PATH}/aclnn_*.cpp ${ASCEND_AUTOGEN_PATH}/aclnnInner_*.cpp)'
++text = text.replace(marker, inner_marker, 1)
 +platform_include = """
 +# CAM82: opdev/platform.h includes platform/platform_info.h from this SDK root.
 +if(TARGET cust_opapi)
-+    set(_cam82_platform_include "$ENV{ASCEND_HOME_PATH}/include/experiment/platform")
-+    foreach(_cam82_header IN ITEMS platform_info.h platform_infos_def.h)
-+        if(NOT EXISTS "${_cam82_platform_include}/platform/${_cam82_header}")
-+            message(FATAL_ERROR "CAM82 missing SDK header: ${_cam82_platform_include}/platform/${_cam82_header}")
++    set(_cam82_platform_include "")
++    foreach(_cam82_candidate IN ITEMS "$ENV{ASCEND_HOME_PATH}/include/experiment/platform" "$ENV{ASCEND_HOME_PATH}/include")
++        if(EXISTS "${_cam82_candidate}/platform/platform_info.h" AND EXISTS "${_cam82_candidate}/platform/platform_infos_def.h")
++            set(_cam82_platform_include "${_cam82_candidate}")
++            break()
 +        endif()
 +    endforeach()
++    if(NOT _cam82_platform_include)
++        message(FATAL_ERROR "CAM82 missing SDK header: platform/platform_info.h or platform/platform_infos_def.h under current SDK")
++    endif()
 +    target_include_directories(cust_opapi PRIVATE "${_cam82_platform_include}")
 +    message(STATUS "CAM82_PLATFORM_INCLUDE=${_cam82_platform_include}")
 +endif()
