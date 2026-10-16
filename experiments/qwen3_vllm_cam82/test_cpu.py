@@ -204,6 +204,55 @@ class PolicyTests(unittest.TestCase):
         self.assertLess(cam_stage.index("CAM82_BUILD_TORCH_IMPORT_OK"), cam_stage.index("BUILD_JOBS=4"))
         self.assertIn("CAM82_NATIVE_IMPORT_OK", docker)
 
+    def test_runtime_environment_for_both_hosts_and_missing_cam_api(self):
+        # Source the actual script with only machine-specific SDK/workdir
+        # operations mocked; no Torch/NPU imports or real SDK writes.
+        text = (HERE / "env.sh").read_text()
+        text = text.replace("source /usr/local/Ascend/ascend-toolkit/set_env.sh || return", ":")
+        text = text.replace("source /usr/local/Ascend/nnal/atb/set_env.sh || return", ":")
+        text = text.replace("cd /ssd_2/yuanwenliu/sglang || return", 'cd "$CAM82_TEST_WORKDIR" || return')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "env.sh"
+            script.write_text(text)
+            library = root / "opp/vendors/CAM/op_api/lib/libcust_opapi.so"
+            library.parent.mkdir(parents=True)
+            library.touch()
+            env = {**os.environ, "CAM82_TEST_WORKDIR": directory,
+                   "ASCEND_HOME_PATH": "/mock/cann", "ASCEND_OPP_PATH": str(root / "opp"),
+                   "ASCEND_CUSTOM_OPP_PATH": "/mock/existing/vendor",
+                   "LD_LIBRARY_PATH": "/mock/cann/aarch64-linux/devlib",
+                   "HCCL_INTRA_PCIE_ENABLE": "1", "HCCL_INTRA_ROCE_ENABLE": "0"}
+            for host in ("228", "238"):
+                command = ('source "$1" "$2" || exit $?; '
+                           'test -z "${HCCL_INTRA_PCIE_ENABLE+x}" || exit 20; '
+                           'test -z "${HCCL_INTRA_ROCE_ENABLE+x}" || exit 21; '
+                           'printf "STATE=%s|%s|%s|%s\\n" "$QWEN_CAM82_HOST" '
+                           '"$VLLM_HOST_IP" "$ASCEND_CUSTOM_OPP_PATH" "$LD_LIBRARY_PATH"')
+                output = subprocess.check_output(["bash", "-c", command, "test", str(script), host],
+                                                 env=env, text=True)
+                state = next(line for line in output.splitlines() if line.startswith("STATE="))
+                actual_host, ip, custom, ld = state.removeprefix("STATE=").split("|")
+                self.assertEqual((actual_host, ip), (host, "10.155.205." + host))
+                self.assertEqual(custom.split(":"), [str(root / "opp/vendors/CAM"), "/mock/existing/vendor"])
+                self.assertEqual(ld.split(":")[:3], ["/mock/cann/lib64", "/mock/cann/aarch64-linux/lib64",
+                                                       str(library.parent)])
+            library.unlink()
+            result = subprocess.run(["bash", "-c", 'source "$1" 238', "test", str(script)],
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Missing CAM operator API:", result.stderr)
+            self.assertNotIn("CAM82_ENV_READY", result.stdout)
+
+    def test_238_docs_gate_each_probe_and_do_not_require_rebuild(self):
+        text = (HERE / "README.md").read_text()
+        section = text.split("## 6 ", 1)[1].split("## 7 ", 1)[0]
+        self.assertIn("env.sh 238", section)
+        self.assertIn('ctypes.CDLL("libcust_opapi.so")', section)
+        self.assertIn("CAM_TP_SMOKE_PASS mode=hccl-a2a", section)
+        self.assertIn("前一项失败不要继续", section)
+        self.assertIn("不需要重建、重新传输镜像", text)
+
     def test_pregen_patch_maps_only_all2all_and_refuses_reapplication(self):
         patch_file = HERE / "patches/umdk-all2all-pregen-prefix.patch"
         original = ('\n# aclnn autogen file prefix: all_gather_detour -> aclnn_all_gather_detour\n'

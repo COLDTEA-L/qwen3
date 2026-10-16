@@ -64,6 +64,12 @@ git -C /ssd_2/yuanwenliu/vllm-ascend-cam82 rev-parse HEAD
 mkdir -p /ssd_2/yuanwenliu/models
 ```
 
+`vllm-ascend-cam82`是宿主机挂载目录（主要提供P/D请求代理示例），不会随`docker save/load`传输。228若未准备该目录，创建容器会报`Missing mount`。可以在238宿主机执行下列命令复制，之后在228核对上述Ascend源码提交；不要覆盖已有不同版本目录：
+
+```bash
+scp -rp /ssd_2/yuanwenliu/vllm-ascend-cam82 yuanwenliu@10.155.205.228:/ssd_2/yuanwenliu/
+```
+
 238准备Docker构建源码（目录存在就检查，不重复覆盖）：
 
 ```bash
@@ -357,9 +363,21 @@ python experiments/qwen3_vllm_cam82/check.py --device --model
 python experiments/qwen3_vllm_cam82/test_cpu.py
 ```
 
-238容器同样做，source参数改238。需`CAM82_CHECK_PASS`和CPU测试成功。包检查不等于CAM/PD运行成功。不能source旧qwen3_cam/env.sh或qwen3_vllm/env.sh；不要设置ASCEND_RT_VISIBLE_DEVICES，物理选择由新worker明确处理。模型离线；228/238的KV与DP通信必须联网。
+238容器明确执行（不是在238宿主机直接source）：
 
-这轮旧HCCL Ascend transport不沿用此前Direct TE要求的机内RoCE开关；env固定`HCCL_INTRA_ROCE_ENABLE=0`，用于保持机内HCCS候选路径、跨机仍可RoCE。实际链路仍需profile/计数核实，所有对照组保持同一设置，不把选路变化当成拥塞影响。
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+python experiments/qwen3_vllm_cam82/check.py --device --model
+python experiments/qwen3_vllm_cam82/test_cpu.py
+```
+
+需`CAM82_CHECK_PASS`和CPU测试成功。包检查不等于CAM/PD运行成功。不能source旧qwen3_cam/env.sh或qwen3_vllm/env.sh；不要设置ASCEND_RT_VISIBLE_DEVICES，物理选择由新worker明确处理。模型离线；228/238的KV与DP通信必须联网。
+
+**两机运行环境修正（228已实测通过，238待验证）：** 新`env.sh`会取消`HCCL_INTRA_PCIE_ENABLE`和`HCCL_INTRA_ROCE_ENABLE`两项覆盖，让HCCL按默认拓扑选择。旧脚本只设`HCCL_INTRA_ROCE_ENABLE=0`会触发本环境的EI0001参数校验错误；不能再单独设置这一项，也不沿用此前Direct TE的机内RoCE开关。取消覆盖不等于证明流量必走HCCS，实际链路仍需profile/计数核实，所有对照组保持相同配置。
+
+新脚本同时将`${ASCEND_OPP_PATH}/vendors/CAM`加入`ASCEND_CUSTOM_OPP_PATH`，将其`op_api/lib`目录加入`LD_LIBRARY_PATH`，并保持toolkit运行库优先。原因是CAM扩展运行时按文件名`libcust_opapi.so`加载API；仅在构建时按绝对路径加载通过，不代表运行时能够找到。缺少该配置时，会在第一次CAM调用报`aclnnAll2AllDetour ... not in libopapi.so`，即使`CamCommInit`已经成功。
+
+**本次只改宿主机挂载的环境脚本和文档，不改算子二进制或适配包；两机更新实验仓库后，在各自容器的新窗口重新source即可，不需要重建、重新传输镜像。** 更新前的已运行进程不会自动改变环境。
 
 适配包在镜像里安装，不会仅因宿主机拉新代码而自动更新。后续纯Python修订可在新CAM82容器内离线执行`python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm_cam82/adapter`，记录HEAD并重跑关口；涉及CAM/CANN/native库版本变化必须重新构建镜像。不把适配包安装到旧CANN9/SGLang容器。
 
@@ -371,15 +389,40 @@ for i in 0 1 2 3 4 5 6 7; do /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -i
 
 ## 6 先验收CAM三种TP语义，再启动模型
 
+2026-10-16用户反馈：228在取消上述HCCL变量覆盖并补齐CAM库/算子包路径后，HCCL与CAM两项测试退出码均为0。238尚未执行本轮修正后的测试；不能以228结果代替238验收。以下为每台机器独立的机内测试，228/238不需要同时启动。
+
+238先在宿主机进入已创建的新实验容器（尚未创建时先完成第5节）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+```
+
+然后在238容器执行；228复测时仅将source参数改为228：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+printenv | grep -E '^HCCL_INTRA_(PCIE|ROCE)_ENABLE='
+python -c 'import torch, torch_npu, ctypes; lib=ctypes.CDLL("libcust_opapi.so"); print(lib.aclnnAll2AllDetour); print(lib.aclnnAll2AllDetourGetWorkspaceSize); print("CAM_API_LOOKUP_OK")'
+```
+
+`printenv | grep`应无输出（退出码1表示没有这两个变量，正常）；Python检查应打印`CAM_API_LOOKUP_OK`。这是按文件名加载的检查，不进行NPU通信；若失败先停止，不继续probe。不要重新安装其他版本算子或复制开发机8.5产物。
+
 确认自己的旧服务/probe已正常退出，并获得两机16卡实验窗口；不要kill他人任务。下面每台新容器各自运行，**只用于probe，不用于模型启动**：
 
 ```bash
 set -o pipefail
 torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --master_port=29631 experiments/qwen3_vllm_cam82/smoke_tp.py --mode hccl-a2a 2>&1 | tee "experiments/qwen3_vllm_cam82/results/tp-hccl-$(date +%Y%m%d-%H%M%S).log"
-torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --master_port=29631 experiments/qwen3_vllm_cam82/smoke_tp.py --mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/tp-cam-$(date +%Y%m%d-%H%M%S).log"
+echo "HCCL测试退出码=$?"
 ```
 
-需两台机分别`CAM_TP_SMOKE_PASS`并全部进程退出。它同时运行两个TP4子组，测试AllReduce/ReduceScatter/AllGather、fp32/bf16、跨chunk、小输入、维度变换和空输入，对照HCCL结果。发现卡号错配/挂起/不一致，停止启动模型；两组同时使用CAM窗口是重要关口，不用CPU代数验证替代。probe在结束时通过进程退出释放自己的窗口，不手动清其他进程HBM。
+先确认退出码0且出现`CAM_TP_SMOKE_PASS mode=hccl-a2a`，再执行下一组；前一项失败不要继续：
+
+```bash
+torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --master_port=29631 experiments/qwen3_vllm_cam82/smoke_tp.py --mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/tp-cam-$(date +%Y%m%d-%H%M%S).log"
+echo "CAM测试退出码=$?"
+```
+
+需两台机的两种mode分别出现`CAM_TP_SMOKE_PASS`、退出码0且全部进程退出，才能进入第7节。它同时运行两个TP4子组，测试AllReduce/ReduceScatter/AllGather、fp32/bf16、跨chunk、小输入、维度变换和空输入，对照HCCL结果。发现卡号错配/挂起/不一致，停止启动模型；两组同时使用CAM窗口是重要关口，不用CPU代数验证替代。probe在结束时通过进程退出释放自己的窗口，不手动清其他进程HBM。
 
 ## 7 原生P4+D8：TP off对照（MoE保持原生All-to-All）
 
