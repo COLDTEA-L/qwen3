@@ -1,5 +1,6 @@
 """CANN8.2 P4+D8: native Qwen MoE, opt-in CAM TP. CPU-safe dry-run."""
 import argparse
+import importlib
 import importlib.util
 import json
 import os
@@ -21,7 +22,7 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
     model = model or ROOT + "/models/Qwen3-30B-A3B"
     if not Path(model).is_absolute():
         raise ValueError("Use an absolute local model path")
-    kv = {"kv_connector": "MooncakeConnectorV1", "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+    kv = {"kv_connector": "MooncakeConnector", "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
           "kv_role": "kv_producer" if p else "kv_consumer", "kv_buffer_device": "npu",
           "engine_id": "cam82-" + role, "kv_port": 20010 if p else 20040,
           "kv_connector_extra_config": {"use_ascend_direct": False,
@@ -46,6 +47,24 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
            "VLLM_HOST_IP": "10.155.205." + host, "HCCL_IF_IP": "10.155.205." + host,
            "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "0", "VLLM_USE_V1": "1"}
     return cmd, env
+
+
+def check_connector(kv):
+    """Resolve the native class without creating a scheduler/worker or TE."""
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+    module = importlib.import_module(kv["kv_connector_module_path"])
+    name = kv["kv_connector"]
+    expected = getattr(module, name, None)
+    if not isinstance(expected, type) or not issubclass(expected, KVConnectorBase_V1):
+        raise RuntimeError(f"Expected Ascend V1 connector class {module.__name__}.{name}; "
+                           "the class name in this release is MooncakeConnector, not MooncakeConnectorV1")
+    selected = KVConnectorFactory.get_connector_class(KVTransferConfig(**kv))
+    if selected is not expected:
+        raise RuntimeError("KV factory selected a different connector; refuse an unintended transport")
+    print(f"CAM82_KV_CONNECTOR_OK {module.__name__}.{name} (class resolution only, no KV transfer)", flush=True)
+    return selected
 
 
 def main():
@@ -85,6 +104,8 @@ def main():
         parser.error("Installed CAM82 adapter is old. Follow README 5.1 to install adapter 0.1.1 offline in BOTH containers")
     from qwen_cam82.policy import check_installation
     check_installation()
+    if args.action == "serve":
+        check_connector(json.loads(cmd[cmd.index("--kv-transfer-config") + 1]))
     os.execvpe(cmd[0], cmd, {**os.environ, **env})
 
 

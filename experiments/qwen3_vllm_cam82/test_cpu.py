@@ -1,5 +1,6 @@
 """CPU/mock regressions. Numeric tests use NumPy, never Torch or an NPU."""
 import contextlib
+import ast
 import ctypes
 import importlib.util
 import io
@@ -320,8 +321,51 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(env["VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP"], "0")
             self.assertNotIn("qwen_moe_adapter", " ".join(cmd))
             kv = json.loads(cmd[cmd.index("--kv-transfer-config") + 1])
+            self.assertEqual(kv["kv_connector"], "MooncakeConnector")
             self.assertFalse(kv["kv_connector_extra_config"]["use_ascend_direct"])
             self.assertIn("vllm_ascend.distributed.mooncake_connector", kv["kv_connector_module_path"])
+
+    def test_all_roles_and_modes_use_actual_ascend_connector_name(self):
+        for role in policy.ROLES:
+            for mode in policy.MODES:
+                cmd, _ = launch.command(role, mode)
+                kv = json.loads(cmd[cmd.index("--kv-transfer-config") + 1])
+                self.assertEqual(kv["kv_connector"], "MooncakeConnector")
+                self.assertEqual(kv["kv_connector_module_path"], "vllm_ascend.distributed.mooncake_connector")
+
+    def test_connector_factory_resolution_is_v1_and_never_constructs_transport(self):
+        class Base:
+            pass
+        class Connector(Base):
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("Preflight must not construct a connector/TE")
+        names = ("vllm", "vllm.config", "vllm.distributed", "vllm.distributed.kv_transfer",
+                 "vllm.distributed.kv_transfer.kv_connector", "vllm.distributed.kv_transfer.kv_connector.factory",
+                 "vllm.distributed.kv_transfer.kv_connector.v1", "vllm.distributed.kv_transfer.kv_connector.v1.base",
+                 "vllm_ascend", "vllm_ascend.distributed", "vllm_ascend.distributed.mooncake_connector")
+        modules = {name: ModuleType(name) for name in names}
+        for name, module in modules.items():
+            if "." in name:
+                parent, attr = name.rsplit(".", 1)
+                setattr(modules[parent], attr, module)
+        connector_module = modules["vllm_ascend.distributed.mooncake_connector"]
+        connector_module.MooncakeConnector = Connector
+        modules["vllm.config"].KVTransferConfig = NS
+        modules["vllm.distributed.kv_transfer.kv_connector.v1.base"].KVConnectorBase_V1 = Base
+        factory = NS(get_connector_class=lambda cfg: getattr(connector_module, cfg.kv_connector))
+        modules["vllm.distributed.kv_transfer.kv_connector.factory"].KVConnectorFactory = factory
+        cmd, _ = launch.command("p-228")
+        kv = json.loads(cmd[cmd.index("--kv-transfer-config") + 1])
+        with patch.dict(sys.modules, modules):
+            self.assertIs(launch.check_connector(kv), Connector)
+            with self.assertRaisesRegex(RuntimeError, "class name"):
+                launch.check_connector({**kv, "kv_connector": "MooncakeConnectorV1"})
+            factory.get_connector_class = lambda cfg: type("WrongTransport", (Base,), {})
+            with self.assertRaisesRegex(RuntimeError, "different connector"):
+                launch.check_connector(kv)
+            connector_module.MooncakeConnector = object
+            with self.assertRaisesRegex(RuntimeError, "Expected Ascend V1"):
+                launch.check_connector(kv)
 
     def test_config_native_only(self):
         cfg = NS(model_config=NS(enforce_eager=True, quantization=None, dtype="bfloat16",
@@ -345,6 +389,12 @@ class PolicyTests(unittest.TestCase):
         text = (root / "ascend_forward_context.py").read_text()
         self.assertIn("ep_size < 16 or with_prefill", text)
         self.assertIn("return FusedMoEState.All2All", text)
+        connector_tree = ast.parse((root / "distributed/mooncake_connector.py").read_text())
+        classes = {node.name: node for node in connector_tree.body if isinstance(node, ast.ClassDef)}
+        self.assertIn("MooncakeConnector", classes)
+        self.assertNotIn("MooncakeConnectorV1", classes)
+        self.assertIn("KVConnectorBase_V1", [base.id for base in classes["MooncakeConnector"].bases
+                                            if isinstance(base, ast.Name)])
 
     def test_source_guard_refuses_missing(self):
         with tempfile.TemporaryDirectory() as directory:

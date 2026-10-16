@@ -451,6 +451,49 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 均通过后，228已通过的第6节probe不必因纯Python启动修复重测；238若仍未通过第6节，先完成它。然后按第7节的完整窗口命令重新开始off基线，保留新时间戳日志，不能拿旧`p-off-20261016-030626.log`代替新一轮结果。每个P/D入口应输出`CAM82_STARTUP_READY ... HCCL_intra_overrides=unset`；两处D还应输出`CAM82_DP_VISIBILITY ... all8_visible=True`。各worker应输出`CAM82_WORKER_DEVICE`，核对物理卡：228 P为0/1/2/3，228 D为4/5/6/7，238 D为0/1/2/3。缺少标记、卡号不符或有新异常时停止后续请求，回传该轮首个实际异常；不取消保护硬跑。
 
+### 5.2 KV连接器类名修正：MooncakeConnector，而非MooncakeConnectorV1
+
+228新一轮06:40日志的实际错误为`AttributeError: module 'vllm_ascend.distributed.mooncake_connector' has no attribute 'MooncakeConnectorV1'`，发生在scheduler通过KVConnectorFactory解析类时。容器导出列表和固定版本源码均确认：实际类名为`MooncakeConnector`，继承`KVConnectorBase_V1`，所以没有V1后缀不意味着使用旧接口。此前本实验启动配置写错类名；不是缺Mooncake包、不是TE建链错误，也不以这个错误判断OOM。
+
+`launch.py`现为P及两端D的所有TP模式统一设置`kv_connector=MooncakeConnector`，保留`kv_connector_module_path=vllm_ascend.distributed.mooncake_connector`及原有KV角色、端口和并行配置。启动及`check.py --device`增加`CAM82_KV_CONNECTOR_OK`检查：通过实际原生工厂解析类，确认来自指定Ascend模块并继承V1基类；若注册表选中其他实现则停止。检查只解析类，不构造scheduler/worker/TransferEngine，也不证明KV已搬运成功。
+
+**228、238都执行（相同命令，宿主机或当前挂载仓库的容器内二选一）：** 先结束自己的失败服务及残留worker，按需准备Git联网代理；有本地改动先处理，不覆盖：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
+git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
+```
+
+本次只修改挂载仓库的`launch.py`、`check.py`及文档/测试，不修改已安装适配包。**已完成5.1并确认适配包为0.1.1的两机，无需再安装包、构建镜像、编译算子或传输Docker。** 尚未完成5.1的机器仍需先完成5.1。
+
+**228、238都执行（相同命令，宿主机新窗口）：** 已在实验容器内则跳过这一行：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+```
+
+仅228，容器内：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+```
+
+仅238，容器内：
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+```
+
+**228、238都执行（相同命令，容器内，完成各自source之后）：**
+
+```bash
+python experiments/qwen3_vllm_cam82/check.py --device --model
+python experiments/qwen3_vllm_cam82/test_cpu.py
+```
+
+需出现`CAM82_KV_CONNECTOR_OK vllm_ascend.distributed.mooncake_connector.MooncakeConnector`及`CAM82_CHECK_PASS`，然后按第7节原命令重新启动三个服务。新打印的COMMAND中应为`"kv_connector": "MooncakeConnector"`；若仍为V1后缀，运行的是旧启动脚本。不要手工给第三方模块添加别名或修改源码指纹来绕过检查。当前修正针对已确认的类名异常，完整P/D、EP8与真实KV迁移仍待验收。
+
 ## 6 先验收CAM三种TP语义，再启动模型
 
 2026-10-16用户反馈：228在取消上述HCCL变量覆盖并补齐CAM库/算子包路径后，HCCL与CAM两项测试退出码均为0。238尚未执行本轮修正后的测试；不能以228结果代替238验收。以下为每台机器独立的机内测试，228/238不需要同时启动。

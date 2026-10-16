@@ -33,6 +33,9 @@ def main():
         for attr in ("initialize", "register_memory", "transfer_sync_write", "get_rpc_port"):
             if not hasattr(te, attr):
                 raise RuntimeError("Missing native PD TE API " + attr)
+        from launch import check_connector, command
+        cmd, _ = command("p-228")
+        check_connector(json.loads(cmd[cmd.index("--kv-transfer-config") + 1]))
         print("CAM_NATIVE_IMPORT_OK", op.__file__)
     if args.model:
         path = Path(os.environ["MODEL_PATH"])
