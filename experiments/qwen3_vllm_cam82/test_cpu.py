@@ -253,6 +253,33 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("前一项失败不要继续", section)
         self.assertIn("不需要重建、重新传输镜像", text)
 
+    def test_docs_windows_are_self_contained_and_hosts_explicit(self):
+        text = (HERE / "README.md").read_text()
+        self.assertNotIn("source参数改为", text)
+        self.assertIn("228、238都执行（相同命令", text)
+        gates = text.split("## 6 ", 1)[1].split("## 7 ", 1)[0]
+        for host in ("228", "238"):
+            self.assertIn("env.sh " + host, gates)
+        for section_id, next_id, modes in (("7", "8", ("off",)),
+                                            ("8", "9", ("cam-detour", "hccl-a2a"))):
+            section = text.split("## " + section_id + " ", 1)[1].split("## " + next_id + " ", 1)[0]
+            blocks = [chunk.split("```", 1)[0] for chunk in section.split("```bash\n")[1:]]
+            for mode in modes:
+                for role, host in (("p-228", "228"), ("d8-228", "228"), ("d8-238", "238")):
+                    command = "launch.py serve --role " + role + " --tp-mode " + mode
+                    matches = [block for block in blocks if command in block]
+                    self.assertEqual(len(matches), 1, command)
+                    self.assertTrue(matches[0].startswith("docker exec -it qwen3-vllm-cam82 bash\n"))
+                    self.assertIn("env.sh " + host + "\n", matches[0])
+                    self.assertIn("set -o pipefail", matches[0])
+            for block in blocks:
+                if "launch.py proxy" in block or "compare_outputs.py collect" in block:
+                    self.assertTrue(block.startswith("docker exec -it qwen3-vllm-cam82 bash\n"))
+                    self.assertIn("env.sh 228\n", block)
+                if "relay.py" in block:
+                    self.assertTrue(block.startswith("docker exec -it qwen3-vllm-cam82 bash\n"))
+                    self.assertIn("env.sh 238\n", block)
+
     def test_pregen_patch_maps_only_all2all_and_refuses_reapplication(self):
         patch_file = HERE / "patches/umdk-all2all-pregen-prefix.patch"
         original = ('\n# aclnn autogen file prefix: all_gather_detour -> aclnn_all_gather_detour\n'

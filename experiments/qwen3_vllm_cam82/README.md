@@ -1,6 +1,8 @@
 # Qwen3：CANN 8.2 / vLLM 原生 MoE + CAM TP 多路径实验
 
-更新：2026-10-16。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。代码已接入，**未在910B4实机完整编译/跑通**；每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
+更新：2026-10-16。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。用户已在228完成HCCL与CAM机内probe（退出码均0）；**238修正后probe及完整P/D模型实验尚待验收**，每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
+
+执行约定：标注“228、238都执行（相同命令）”的代码块，要在两台机器上各执行一次，不要求同一时刻执行；标注具体主机/窗口的代码块只在指定位置执行。新开SSH窗口默认位于宿主机；出现`docker exec`的代码块，第一行在宿主机执行，进入容器后再执行后续行。已经在该容器内时，不重复执行`docker exec`，也不在容器内运行Docker构建/导入命令。
 
 ## 1 布局、版本与接入边界
 
@@ -39,7 +41,7 @@ D整体Attention TP4＋DP2、MoE EP8；专家在8卡间分片，每卡16个。P�
 
 所有个人文件放`/ssd_2/yuanwenliu`，不写`/ssd_2/sglang`。有卡机不连接8.146开发机；运行期间只有228/238互通。实验机只拉代码，不发布代码。
 
-已有实验仓库在两机分别执行；若有本地改动，先处理，不reset/覆盖：
+**228、238都执行（相同命令，宿主机）：** 更新已有实验仓库；若有本地改动，先处理，不reset/覆盖：
 
 ```bash
 cd /ssd_2/yuanwenliu/sglang
@@ -48,14 +50,14 @@ git pull --ff-only origin feat/qwen3-cam-detour-conflict
 git rev-parse HEAD
 ```
 
-没有仓库时才clone：
+**228、238中尚无实验仓库的机器才执行（相同命令，宿主机）：**
 
 ```bash
 cd /ssd_2/yuanwenliu
 git clone --branch feat/qwen3-cam-detour-conflict https://github.com/COLDTEA-L/qwen3.git sglang
 ```
 
-两机各准备固定版本proxy源码，不移动旧`vllm-ascend-qwen3`：
+**228、238都需要（相同命令，宿主机）：** 准备固定版本proxy源码；目录已存在时只核对提交，不重复clone，不移动旧`vllm-ascend-qwen3`：
 
 ```bash
 cd /ssd_2/yuanwenliu
@@ -63,6 +65,8 @@ git clone --depth 1 --branch v0.10.2rc1 https://github.com/vllm-project/vllm-asc
 git -C /ssd_2/yuanwenliu/vllm-ascend-cam82 rev-parse HEAD
 mkdir -p /ssd_2/yuanwenliu/models
 ```
+
+已有容器时，也可以在容器内更新挂载的`/ssd_2/yuanwenliu/sglang`，宿主机与容器操作的是同一份实验代码，二选一执行即可，不并发进行Git更新。需联网代理时在更新前配置；`env.sh`会清除代理，更新完成后才加载运行环境。算子/依赖源码的准备、Docker构建仍在指定宿主机进行。
 
 `vllm-ascend-cam82`是宿主机挂载目录（主要提供P/D请求代理示例），不会随`docker save/load`传输。228若未准备该目录，创建容器会报`Missing mount`。可以在238宿主机执行下列命令复制，之后在228核对上述Ascend源码提交；不要覆盖已有不同版本目录：
 
@@ -87,7 +91,7 @@ UMDK应为上表9c0bbdad。若GitCode分支尚未到该提交，需要先从开�
 
 ## 3 权重准备：已有就复用，缺失再下载
 
-两机已有完整Qwen3-30B-A3B BF16权重即可跳过下载，不能用量化权重替代。每台宿主机查看：
+两机已有完整Qwen3-30B-A3B BF16权重即可跳过下载，不能用量化权重替代。**228、238都执行（相同命令，宿主机）：**
 
 ```bash
 df -h /ssd_2/yuanwenliu /ssd_1/docker
@@ -111,7 +115,7 @@ export HF_HUB_DISABLE_XET=1
 scp -rp /ssd_2/yuanwenliu/models/Qwen3-30B-A3B yuanwenliu@10.155.205.228:/ssd_2/yuanwenliu/models/
 ```
 
-两机分别计算safetensors校验和，比较结果：
+**228、238都执行（相同命令，宿主机）：** 计算safetensors校验和，比较两机结果：
 
 ```bash
 find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec sha256sum {} \;
@@ -119,7 +123,7 @@ find /ssd_2/yuanwenliu/models/Qwen3-30B-A3B -name '*.safetensors' -type f -exec 
 
 ## 4 238宿主机：构建新Docker，复制给228
 
-**当前进度（2026-10-16）：238已完成算子包及wheel的编译安装，最终导入CAM扩展时bad_alloc，整套8.2镜像仍未构建成功。已在开发服务器cam_lyw_dev_85容器复现并修正通信库加载时的全局正则问题，同时修正遗漏的inner API编译源；8.5环境的内核、.run、wheel、扩展导入和API库加载均已验证。详见4.5.6及DEV85_VALIDATION.md。按用户要求不清理磁盘、不构建开发机整套8.2镜像；8.5产物不能直接用于238的8.2/Torch2.7环境。238更新源码后仍从4.5构建，不重下基础镜像或vendor。**
+**当前进度（2026-10-16）：用户已将238构建的实验镜像传入228，并在228补齐运行环境后通过HCCL与CAM机内probe。已有该镜像的228/238不因本次文档/环境脚本更新而重做本节构建与传输，直接按第5、6节继续。以下4.5.1–4.5.6保留历史构建故障及修正记录，供首次构建或排障使用；不是要求重新执行所有修复步骤。开发服务器的8.5隔离产物不能直接用于A2的8.2/Torch2.7环境。**
 
 ### 4.1 检查宿主机磁盘空间
 
@@ -346,27 +350,35 @@ docker image inspect qwen3-vllm:cam82-v1 --format '{{.Id}} {{.Architecture}}'
 
 ## 5 两机建容器、进入和预检查
 
-两机各在宿主机执行；使用新容器名，不替换旧实验：
+**228、238都执行（相同命令，宿主机，仅首次创建）：** 使用新容器名，不替换旧实验；容器已存在则跳过创建，直接进入：
 
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 bash experiments/qwen3_vllm_cam82/create_container.sh qwen3-vllm:cam82-v1 qwen3-vllm-cam82 --print-only
 bash experiments/qwen3_vllm_cam82/create_container.sh qwen3-vllm:cam82-v1 qwen3-vllm-cam82
+```
+
+**228、238都执行（相同命令，各开一个宿主机窗口）：**
+
+```bash
 docker exec -it qwen3-vllm-cam82 bash
 ```
 
-每个新窗口先docker exec进入容器，再source。228容器：
+**仅228，在刚进入的容器内加载环境：**
 
 ```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
-python experiments/qwen3_vllm_cam82/check.py --device --model
-python experiments/qwen3_vllm_cam82/test_cpu.py
 ```
 
-238容器明确执行（不是在238宿主机直接source）：
+**仅238，在刚进入的容器内加载环境：**
 
 ```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+```
+
+**228、238都执行（相同命令，容器内，完成各自source之后）：**
+
+```bash
 python experiments/qwen3_vllm_cam82/check.py --device --model
 python experiments/qwen3_vllm_cam82/test_cpu.py
 ```
@@ -381,7 +393,7 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 适配包在镜像里安装，不会仅因宿主机拉新代码而自动更新。后续纯Python修订可在新CAM82容器内离线执行`python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm_cam82/adapter`，记录HEAD并重跑关口；涉及CAM/CANN/native库版本变化必须重新构建镜像。不把适配包安装到旧CANN9/SGLang容器。
 
-两机宿主机各查8张NPU IP/链路，无须贴所有listen端口；失败时回传相关卡输出：
+**228、238都执行（相同命令，宿主机）：** 各查8张NPU IP/链路，无须贴所有listen端口；失败时回传相关卡输出：
 
 ```bash
 for i in 0 1 2 3 4 5 6 7; do /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -ip -g; /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -link -g; done
@@ -391,23 +403,34 @@ for i in 0 1 2 3 4 5 6 7; do /usr/local/Ascend/driver/tools/hccn_tool -i "$i" -i
 
 2026-10-16用户反馈：228在取消上述HCCL变量覆盖并补齐CAM库/算子包路径后，HCCL与CAM两项测试退出码均为0。238尚未执行本轮修正后的测试；不能以228结果代替238验收。以下为每台机器独立的机内测试，228/238不需要同时启动。
 
-238先在宿主机进入已创建的新实验容器（尚未创建时先完成第5节）：
+**228、238都执行（相同命令，各自新开宿主机窗口）：** 进入已创建的实验容器；尚未创建时先完成第5节。228已通过本节可跳过复测，继续为238完成本节：
 
 ```bash
 docker exec -it qwen3-vllm-cam82 bash
 ```
 
-然后在238容器执行；228复测时仅将source参数改为228：
+**仅228，容器内：**
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+```
+
+**仅238，容器内：**
 
 ```bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+```
+
+**228、238都执行（相同命令，容器内，完成各自source之后）：**
+
+```bash
 printenv | grep -E '^HCCL_INTRA_(PCIE|ROCE)_ENABLE='
 python -c 'import torch, torch_npu, ctypes; lib=ctypes.CDLL("libcust_opapi.so"); print(lib.aclnnAll2AllDetour); print(lib.aclnnAll2AllDetourGetWorkspaceSize); print("CAM_API_LOOKUP_OK")'
 ```
 
 `printenv | grep`应无输出（退出码1表示没有这两个变量，正常）；Python检查应打印`CAM_API_LOOKUP_OK`。这是按文件名加载的检查，不进行NPU通信；若失败先停止，不继续probe。不要重新安装其他版本算子或复制开发机8.5产物。
 
-确认自己的旧服务/probe已正常退出，并获得两机16卡实验窗口；不要kill他人任务。下面每台新容器各自运行，**只用于probe，不用于模型启动**：
+确认自己的旧服务/probe已正常退出，并获得两机16卡实验窗口；不要kill他人任务。**228、238都执行（相同命令，容器内）：** 先测HCCL，**只用于probe，不用于模型启动**：
 
 ```bash
 set -o pipefail
@@ -415,7 +438,7 @@ torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --m
 echo "HCCL测试退出码=$?"
 ```
 
-先确认退出码0且出现`CAM_TP_SMOKE_PASS mode=hccl-a2a`，再执行下一组；前一项失败不要继续：
+先确认各自退出码0且出现`CAM_TP_SMOKE_PASS mode=hccl-a2a`。**228、238都执行（相同命令，容器内）：** 再测CAM；前一项失败不要继续：
 
 ```bash
 torchrun --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --master_port=29631 experiments/qwen3_vllm_cam82/smoke_tp.py --mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/tp-cam-$(date +%Y%m%d-%H%M%S).log"
@@ -426,11 +449,13 @@ echo "CAM测试退出码=$?"
 
 ## 7 原生P4+D8：TP off对照（MoE保持原生All-to-All）
 
-以下三个服务窗口各自source。先不用中继进程，因为off不创建CAM窗口。模型服务**不用torchrun**。
+本节需要228的4个SSH窗口和238的1个SSH窗口；各前台服务保持运行，不要退出。每块命令都写全进入容器和加载环境的步骤：第一行在对应宿主机执行，进入容器后再执行后续行。先不用中继进程，因为off不创建CAM窗口。模型服务**不用torchrun**。启动228的P之后，接着启动两处D，不等待单侧D独立就绪；两处D需互相连接。
 
 228窗口1（P4）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 set -o pipefail
 python -u experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode off 2>&1 | tee "experiments/qwen3_vllm_cam82/results/p-off-$(date +%Y%m%d-%H%M%S).log"
 ```
@@ -438,6 +463,8 @@ python -u experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode of
 228窗口2（D8 DP rank0，物理4–7）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 set -o pipefail
 python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode off 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d228-off-$(date +%Y%m%d-%H%M%S).log"
 ```
@@ -445,6 +472,8 @@ python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode o
 238窗口1（D8 DP rank1，物理0–3）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
 set -o pipefail
 python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode off 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d238-off-$(date +%Y%m%d-%H%M%S).log"
 ```
@@ -453,9 +482,11 @@ python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode o
 
 诊断时可在三处serve命令均追加`--max-model-len 1024 --max-num-seqs 2 --gpu-memory-utilization 0.70`，同时缩短客户端输入。原生scheduler可能调整profile/批处理token预算，需记录实际值；启动权重峰值导致的OOM不能仅靠这些参数保证解决。比较TP模式时三组预算保持一致。
 
-三处health成功后，228窗口3启动proxy：
+228窗口3（新开SSH窗口，检查三处health，全部成功后启动proxy；health未成功不要继续）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 curl --noproxy '*' -fsS http://10.155.205.228:30010/health
 curl --noproxy '*' -fsS http://10.155.205.228:30011/health
 curl --noproxy '*' -fsS http://10.155.205.238:30011/health
@@ -465,6 +496,8 @@ python -u experiments/qwen3_vllm_cam82/launch.py proxy
 228窗口4发送请求、保存输出与负载（复用CPU客户端，不导入CANN9适配）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 curl --noproxy '*' -fsS http://10.155.205.228:30080/v1/completions -H 'Content-Type: application/json' -d '{"model":"qwen3","prompt":"Explain prefill and decode separation.","max_tokens":32,"temperature":0}'
 python experiments/qwen3_vllm/compare_outputs.py collect --url http://10.155.205.228:30080 --output experiments/qwen3_vllm_cam82/results/pd8-off-output.json
 python experiments/qwen3_vllm/workload.py --requests 20 --rps 0.2 --concurrency 2 --output "experiments/qwen3_vllm_cam82/results/pd8-off-$(date +%Y%m%d-%H%M%S).jsonl"
@@ -474,55 +507,159 @@ python experiments/qwen3_vllm/workload.py --requests 20 --rps 0.2 --concurrency 
 
 ## 8 换成CAM TP：三处服务＋238中继
 
-先正常结束自己的proxy与三处模型，确认worker退出。两机CAM域的所有owner每轮一起新建，不能沿用上一轮残留窗口。
+先正常结束自己的proxy与三处模型，确认worker退出。两机CAM域的所有owner每轮一起新建，不能沿用上一轮残留窗口。本节需要228的4个SSH窗口和238的2个SSH窗口。下面写全各窗口的命令；如果复用的窗口仍在该容器内，跳过该块第一行`docker exec`，从source开始，不要嵌套执行Docker。
 
 238窗口2先启动四个中继owner（随后等D窗口加入CAM域，暂未打印READY属正常）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
 set -o pipefail
 torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 --master_port=29632 experiments/qwen3_vllm_cam82/relay.py 2>&1 | tee "experiments/qwen3_vllm_cam82/results/relay-$(date +%Y%m%d-%H%M%S).log"
 ```
 
-再在第7节对应三个窗口启动：
+228窗口1（P4）：
 
 ```bash
-# 228 P窗口
-python -u experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode cam-detour
-# 228 D窗口
-python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode cam-detour
-# 238 D窗口
-python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode cam-detour
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/p-cam-$(date +%Y%m%d-%H%M%S).log"
+```
+
+228窗口2（D8 DP rank0）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d228-cam-$(date +%Y%m%d-%H%M%S).log"
+```
+
+238窗口1（D8 DP rank1）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode cam-detour 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d238-cam-$(date +%Y%m%d-%H%M%S).log"
 ```
 
 务必启动全部三个模型＋238中继。228的P/D互相提供中继窗口，238由四个owner补齐域。CAM端口为各自host的127.0.0.1:10067，512MiB窗口/卡；不是跨机10067，更不联系8.146。缺owner时bootstrap可等至600秒超时；不能只启动P或只启动一端D并期待CAM就绪。
 
 验收`CAM_RELAY_READY`四次、每模型rank的`CAM_TP_READY`，请求后`CAM_TP_CALL mode=cam-detour op=all_reduce/all_gather/reduce_scatter`以及原生MoE标记。三种调用不要求每个request/每个角色同时出现：prefill SP主要AG/RS、decode主要AR，logits也可能AG。没有调用日志的类型不能当作已测。
 
-health成功后复用第7节proxy与请求。输出另存`pd8-cam-output.json`，比较：
+228窗口3（检查三处health，全部成功后启动本轮proxy）：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+curl --noproxy '*' -fsS http://10.155.205.228:30010/health
+curl --noproxy '*' -fsS http://10.155.205.228:30011/health
+curl --noproxy '*' -fsS http://10.155.205.238:30011/health
+python -u experiments/qwen3_vllm_cam82/launch.py proxy
+```
+
+228窗口4（本轮proxy就绪后，收集输出、比较和发送相同小负载）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 python experiments/qwen3_vllm/compare_outputs.py collect --url http://10.155.205.228:30080 --output experiments/qwen3_vllm_cam82/results/pd8-cam-output.json
 python experiments/qwen3_vllm/compare_outputs.py compare --native experiments/qwen3_vllm_cam82/results/pd8-off-output.json --alltoall experiments/qwen3_vllm_cam82/results/pd8-cam-output.json
+python experiments/qwen3_vllm/workload.py --requests 20 --rps 0.2 --concurrency 2 --output "experiments/qwen3_vllm_cam82/results/pd8-cam-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
 
 工具的`--alltoall`只是第二个快照的参数名，此处比较的是TP模式，不是改MoE。短prompt一致仅是smoke；归约顺序变化可能导致BF16/greedy差异，差异需核对logits/质量，不自动忽略。至少覆盖短/长prefill、混合batch、D一侧空负载、多轮连续请求后才测性能。
 
-额外对照`hccl-a2a`：停自己的整轮服务后，三处`--tp-mode hccl-a2a`重新启动；不启动中继。这组保留相同分块、padding、本地归约及控制barrier，仅交换payload走HCCL，分离分解开销与CAM路径变化。off不是“没有TP通信”，而是原生TP。
+### 8.1 额外对照：hccl-a2a
+
+按第10节退出自己的proxy、P与两端D，确认通信停止后退出238中继及其worker。不启动中继。这组保留相同分块、padding、本地归约及控制barrier，仅交换payload走HCCL，分离分解开销与CAM路径变化。off不是“没有TP通信”，而是原生TP。
+
+228窗口1（P4）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode hccl-a2a 2>&1 | tee "experiments/qwen3_vllm_cam82/results/p-hccl-a2a-$(date +%Y%m%d-%H%M%S).log"
+```
+
+228窗口2（D8 DP rank0）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode hccl-a2a 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d228-hccl-a2a-$(date +%Y%m%d-%H%M%S).log"
+```
+
+238窗口1（D8 DP rank1）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+set -o pipefail
+python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode hccl-a2a 2>&1 | tee "experiments/qwen3_vllm_cam82/results/d238-hccl-a2a-$(date +%Y%m%d-%H%M%S).log"
+```
+
+228窗口3（检查三处health，全部成功后启动本轮proxy）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+curl --noproxy '*' -fsS http://10.155.205.228:30010/health
+curl --noproxy '*' -fsS http://10.155.205.228:30011/health
+curl --noproxy '*' -fsS http://10.155.205.238:30011/health
+python -u experiments/qwen3_vllm_cam82/launch.py proxy
+```
+
+228窗口4（本轮proxy就绪后）：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+python experiments/qwen3_vllm/compare_outputs.py collect --url http://10.155.205.228:30080 --output experiments/qwen3_vllm_cam82/results/pd8-hccl-a2a-output.json
+python experiments/qwen3_vllm/compare_outputs.py compare --native experiments/qwen3_vllm_cam82/results/pd8-off-output.json --alltoall experiments/qwen3_vllm_cam82/results/pd8-hccl-a2a-output.json
+python experiments/qwen3_vllm/workload.py --requests 20 --rps 0.2 --concurrency 2 --output "experiments/qwen3_vllm_cam82/results/pd8-hccl-a2a-$(date +%Y%m%d-%H%M%S).jsonl"
+```
 
 ## 9 冲突与影响评估
 
 本轮能测**CAM TP多路径、原生MoE All-to-All、正常P→D KV**是否共享资源并产生干扰；不包含KV Pool恢复。尤其228的TP子组可借另一角色的卡中继，但不能凭逻辑箭头认定物理链路被KV使用。MoE域与TP组不同，不代表物理链路一定不共享。
 
-按off / hccl-a2a / cam-detour分别运行相同请求序列、SP/并行/模型/预算，固定到达率与输出长度，每组至少3轮。先低负载，再增加并发/请求长度；运行同样的客户端：
+按off / hccl-a2a / cam-detour分别运行相同请求序列、SP/并行/模型/预算，固定到达率与输出长度，每组至少3轮。先低负载，再增加并发/请求长度。**仅228窗口4执行：** 保持当前轮次的模型/proxy运行；新SSH窗口先执行第一行进入容器，复用已在容器内的窗口则从source开始：
 
 ```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 python experiments/qwen3_vllm/workload.py --requests 200 --rps 0.5 --concurrency 4 --prefix-tokens 1024 --output "experiments/qwen3_vllm_cam82/results/load-$(date +%Y%m%d-%H%M%S).jsonl"
 python experiments/qwen3_vllm/workload.py --summarize experiments/qwen3_vllm_cam82/results/本轮结果.jsonl
 ```
 
 记录成功率、TTFT/TPOT P50/P99、吞吐与SLO违反率；200样本仅起步，不能可靠估计极端尾延迟。输入＋输出不得超过2048。观察到后端变快/变慢不等于证明冲突。
 
-device profile：每个模型启动窗口在启动前设置不同的`VLLM_TORCH_PROFILER_DIR`绝对路径，例如228P使用`/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/profiles/run1-p228`，两处D使用各自不同目录。通过每个引擎HTTP端点POST `/start_profile`，短请求窗口后POST `/stop_profile`；proxy不提供这些控制。纯性能轮次不要开profile。
+device profile仅用于诊断轮，不在纯性能轮开启。在第7/8节对应模型窗口中，**进入容器并source后、运行serve之前**分别执行以下配置（这不会让已经运行的引擎自动开始profile）：
+
+仅228窗口1（P4）：
+
+```bash
+export VLLM_TORCH_PROFILER_DIR=/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/profiles/run1-p228
+```
+
+仅228窗口2（D8 DP rank0）：
+
+```bash
+export VLLM_TORCH_PROFILER_DIR=/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/profiles/run1-d228
+```
+
+仅238窗口1（D8 DP rank1）：
+
+```bash
+export VLLM_TORCH_PROFILER_DIR=/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/profiles/run1-d238
+```
+
+通过每个引擎HTTP端点POST `/start_profile`，短请求窗口后POST `/stop_profile`；proxy不提供这些控制。不同轮次另用新目录保留结果。
 
 判定冲突需同时满足：①源/目标及真实共享链路/端口证据；②CAM、MoE、KV在device/SDK完成时间上重叠，跨机时钟校准；③并发相对串行/错峰的通信时延/排队可重复恶化，排除HBM容量、计算、冷连接和分解开销。Host的`CAM_TP::...`范围不是device重叠证据，外部KV transport信息未必都出现在Torch trace。
 
