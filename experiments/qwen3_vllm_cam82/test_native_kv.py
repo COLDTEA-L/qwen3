@@ -3,7 +3,9 @@ import contextlib
 import ast
 import importlib.util
 import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -173,7 +175,7 @@ class NativeKVTests(unittest.TestCase):
 
     def test_old_adapter_preflight_and_current_docs(self):
         text = (HERE / "README.md").read_text()
-        self.assertIn("### 5.4", text)
+        self.assertIn("### 5.5", text)
         self.assertIn("--num-gpu-blocks-override 2048", text)
         self.assertIn("CAM82_KV_REGIONS_OK", text)
         self.assertIn("CAM82_KV_FAIL_STOP", text)
@@ -191,7 +193,7 @@ class NativeKVTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 launch.main()
-        self.assertIn("README 5.4", output.getvalue())
+        self.assertIn("README 5.5", output.getvalue())
 
     def test_short_report_distinguishes_registration_from_real_transfer(self):
         spec = importlib.util.spec_from_file_location("report_kv_test", HERE / "report_kv.py")
@@ -212,6 +214,24 @@ class NativeKVTests(unittest.TestCase):
         self.assertIn("request_ids_with_transfer_failure=1", lines[2])
         self.assertIn("request_ids_with_transfer_success=0", report.summarize(log, "bad")[2])
         self.assertIn("registration_records=0", report.summarize("")[1])
+
+    def test_report_uses_newest_launch_not_old_log_with_new_mtime(self):
+        spec = importlib.util.spec_from_file_location("report_kv_order_test", HERE / "report_kv.py")
+        report = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(report)
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            old = Path(directory) / "p-off-20261020-072806.log"
+            new = Path(directory) / "p-off-20261020-095217.log"
+            old.write_text("COMMAND --block-size 128\n")
+            new.write_text("COMMAND --block-size 64 --num-gpu-blocks-override 2048\n")
+            os.utime(old, (200, 200))
+            os.utime(new, (100, 100))
+            with patch.object(sys, "argv", ["report_kv.py", "--host", "228", "--results", directory]), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                report.main()
+            self.assertIn(new.name, output.getvalue())
+            self.assertNotIn(old.name, output.getvalue())
 
 
 if __name__ == "__main__":

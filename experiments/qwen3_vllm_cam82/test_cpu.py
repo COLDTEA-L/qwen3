@@ -23,6 +23,7 @@ from qwen_cam82.collectives import CamTP
 from qwen_cam82 import hooks
 from qwen_cam82 import startup
 from qwen_cam82 import native_kv
+from qwen_cam82 import aligned_kv
 import launch
 
 try:
@@ -179,7 +180,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("228、238都执行（相同命令，容器内）", section)
         self.assertIn("--no-deps --no-build-isolation --no-index --force-reinstall", section)
         self.assertIn("git -c safe.directory=/ssd_2/yuanwenliu/sglang", section)
-        self.assertIn('assert v=="0.1.2"', section)
+        self.assertIn('assert v=="0.1.3"', section)
         self.assertIn("CAM82_DP_VISIBILITY", section)
         self.assertIn("CAM82_WORKER_DEVICE", section)
         self.assertNotIn("--global", section)
@@ -210,6 +211,7 @@ class PolicyTests(unittest.TestCase):
                 self.cfg = vllm_config
             def init_device(self):
                 current[0] = self.local_rank
+                self.model_runner = NS()
 
         names = ("vllm_ascend", "vllm_ascend.worker", "vllm_ascend.worker.worker_v1",
                  "vllm", "vllm.distributed", "vllm.distributed.parallel_state",
@@ -233,7 +235,8 @@ class PolicyTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, modules), patch.object(policy, "check_installation"), \
              patch("qwen_cam82.collectives.CamTP", side_effect=lambda *args: NS(args=args)), \
-             patch.object(hooks, "install"), patch.object(native_kv, "install") as kv_install:
+             patch.object(hooks, "install"), patch.object(native_kv, "install") as kv_install, \
+             patch.object(aligned_kv, "install") as allocation_install:
             spec.loader.exec_module(module)
             for role in policy.ROLES:
                 ep[0] = 4 if role == "p-228" else 8
@@ -248,6 +251,7 @@ class PolicyTests(unittest.TestCase):
                         self.assertEqual(cfg.parallel_config.data_parallel_rank_local, 0)
                         worker.init_device()
                         kv_install.assert_called_with("native-connector")
+                        allocation_install.assert_called_with(worker.model_runner)
                         self.assertEqual(current[0], policy.physical_device(role, local_rank))
                     count[0] = 4
                     with self.assertRaisesRegex(RuntimeError, "all8 physical"):
@@ -973,7 +977,9 @@ class NumericTests(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     import test_native_kv
+    import test_aligned_kv
     tests.addTests(loader.loadTestsFromModule(test_native_kv))
+    tests.addTests(loader.loadTestsFromModule(test_aligned_kv))
     return tests
 
 

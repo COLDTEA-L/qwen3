@@ -29,7 +29,8 @@ def summarize(text, request_id=None):
         f"logged_flags: block_size={block[1] if block else 'missing'} "
         f"num_blocks_override={capacity[1] if capacity else 'missing'}",
         f"registration_records={len(registered)} unaligned_records={bad} "
-        f"guard_pass_records={text.count('CAM82_KV_REGIONS_OK')}",
+        f"guard_pass_records={text.count('CAM82_KV_REGIONS_OK')} "
+        f"allocation_pass_records={text.count('CAM82_KV_ALLOCATION_OK')}",
         f"request_ids_with_transfer_success={len(successes)} "
         f"request_ids_with_transfer_failure={len(failures)} "
         f"fail_stop_seen={'CAM82_KV_FAIL_STOP' in text}",
@@ -47,8 +48,10 @@ def main():
         if not logs:
             print(f"{role}: no off log found")
             continue
-        log = max(logs, key=lambda path: path.stat().st_mtime)
-        print(f"{role}: {log.name} (latest log, not a live-process health check)")
+        # Names contain the launch timestamp. An older process appending to its
+        # log must not outrank a newer startup failure by mtime.
+        log = max(logs, key=lambda path: path.name)
+        print(f"{role}: {log.name} (latest launch filename, not a live-process health check)")
         for line in summarize(log.read_text(errors="replace"), args.request_id):
             print("  " + line)
 

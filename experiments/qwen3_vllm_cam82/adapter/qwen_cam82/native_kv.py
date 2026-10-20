@@ -1,8 +1,8 @@
 """Qualification guards around the pinned, unmodified Ascend Mooncake worker.
 
-Allocation, attention binding, memory registration and data movement remain
-native. The launcher selects an aligned native cache capacity; these guards
-verify the resulting addresses instead of assuming allocator alignment.
+The paired aligned allocator provides the exact views used by native attention
+binding and native registration/data movement. These guards check their actual
+addresses and reject failed transfers rather than assuming allocator alignment.
 """
 import functools
 import math
@@ -116,7 +116,7 @@ def install(connector):
         guard.install_receiver()
         print(f"CAM82_KV_REGIONS_OK engine={worker.engine_id} regions={count} "
               f"blocks={NUM_BLOCKS} block_tokens={BLOCK_SIZE} "
-              "bytes_per_region=33554432 alignment=2097152 native_allocation=True", flush=True)
+              "bytes_per_region=33554432 alignment=2097152 native_transport=True", flush=True)
         return result
 
     @functools.wraps(native_finished)

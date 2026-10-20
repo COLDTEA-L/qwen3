@@ -13,8 +13,8 @@ def main():
     p.add_argument("--device", action="store_true")
     p.add_argument("--model", action="store_true")
     args = p.parse_args()
-    if md.version("qwen-vllm-cam82") != "0.1.2":
-        raise RuntimeError("Install CAM82 adapter 0.1.2 in BOTH containers; see README 5.4")
+    if md.version("qwen-vllm-cam82") != "0.1.3":
+        raise RuntimeError("Install CAM82 adapter 0.1.3 in BOTH containers; see README 5.5")
     from qwen_cam82.policy import check_installation
     if platform.machine() != "aarch64" or tuple(map(int, platform.python_version_tuple()[:2])) != (3, 11):
         raise RuntimeError("Require A2 arm64 Python3.11 image")
