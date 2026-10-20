@@ -1,6 +1,7 @@
 """Version/source checks; --device imports native libraries, not a runtime certification."""
 import argparse
 import importlib
+import importlib.metadata as md
 import json
 import os
 import platform
@@ -12,10 +13,15 @@ def main():
     p.add_argument("--device", action="store_true")
     p.add_argument("--model", action="store_true")
     args = p.parse_args()
+    if md.version("qwen-vllm-cam82") != "0.1.2":
+        raise RuntimeError("Install CAM82 adapter 0.1.2 in BOTH containers; see README 5.4")
     from qwen_cam82.policy import check_installation
     if platform.machine() != "aarch64" or tuple(map(int, platform.python_version_tuple()[:2])) != (3, 11):
         raise RuntimeError("Require A2 arm64 Python3.11 image")
     print("CAM82_SOURCE_OK", check_installation())
+    from qwen_cam82.native_kv import ALIGNMENT, BLOCK_SIZE, NUM_BLOCKS
+    print(f"CAM82_NATIVE_KV_POLICY block_tokens={BLOCK_SIZE} blocks={NUM_BLOCKS} "
+          f"alignment={ALIGNMENT} (actual addresses checked during model startup)")
     cache = Path("/opt/mooncake-build/CMakeCache.txt").read_text()
     for setting in ("USE_ASCEND:BOOL=ON", "USE_ASCEND_DIRECT:BOOL=OFF", "WITH_STORE:BOOL=OFF"):
         if setting not in cache:

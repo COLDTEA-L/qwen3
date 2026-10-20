@@ -15,6 +15,8 @@ SOURCE_HASHES = {
     "worker/worker_v1.py": "5274bf9f2e6a8db44cba2e8c410b32f2d72d842b85b0ba66d87225f4f06c92d4",
     "ops/fused_moe.py": "cce13119538dacd8468f97c9cfb51d37bb91944b691e26553c29e05c62e7934d",
     "distributed/mooncake_connector.py": "2d620cde420544ce505c12c75263ef0ed12dd7b8ffdafe5b1539c86897d0373c",
+    "worker/model_runner_v1.py": "0616d2afffd777ea62a69a3990923b50b7e790d37a8d8baba884733c0bd449b4",
+    "attention/attention_v1.py": "edfcfc54098753933a08b50273387db9d8c26d8a8b8b1b9a02e9fe2fd40ad3f0",
 }
 
 

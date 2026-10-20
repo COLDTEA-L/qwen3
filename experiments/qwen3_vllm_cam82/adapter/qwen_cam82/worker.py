@@ -1,6 +1,7 @@
 from vllm_ascend.worker.worker_v1 import NPUWorker
 from .policy import ROLES, check_installation, physical_device, validate_config
 from .startup import prepare_environment
+from .native_kv import install as install_native_kv, validate_config as validate_kv_config
 
 
 class QwenCamWorker(NPUWorker):
@@ -8,6 +9,7 @@ class QwenCamWorker(NPUWorker):
                  is_driver_worker=False, **kwargs):
         check_installation()
         validate_config(vllm_config)
+        validate_kv_config(vllm_config)
         # Still reject a masked worker; the parent must prevent DP masking
         # before spawning it, not unset the variable after importing NPU code.
         role, mode = prepare_environment()
@@ -34,6 +36,8 @@ class QwenCamWorker(NPUWorker):
             raise RuntimeError(f"CAM82 wrong NPU mapping: expected physical={expected}, actual={actual}")
         print(f"CAM82_WORKER_DEVICE role={self.cam_role} mode={self.cam_mode} "
               f"physical={actual} all8_visible=True", flush=True)
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
+        install_native_kv(get_kv_transfer_group())
         from vllm.distributed.parallel_state import get_tp_group, get_ep_group
         from .collectives import CamTP
         from .hooks import install

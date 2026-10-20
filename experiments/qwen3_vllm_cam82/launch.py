@@ -1,6 +1,7 @@
 """CANN8.2 P4+D8: native Qwen MoE, opt-in CAM TP. CPU-safe dry-run."""
 import argparse
 import importlib
+import importlib.metadata as md
 import importlib.util
 import json
 import os
@@ -14,6 +15,10 @@ ROLES = {"p-228": ("228", 0), "d8-228": ("228", 4), "d8-238": ("238", 0)}
 # Mooncake connector consumes scheduler block IDs without expanding virtual
 # blocks, so a 128-token scheduler block would address the wrong physical block.
 KV_BLOCK_SIZE = 64
+# Native vLLM capacity override: each K or V region is 2048 * 16KiB = 32MiB.
+# With the original packed [K,V] tensor this keeps V's offset 2MiB-aligned.
+# This is a conservative qualification budget, not an automatic maximum.
+KV_NUM_BLOCKS = 2048
 
 
 def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, memory=0.75):
@@ -37,7 +42,8 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
            "--distributed-executor-backend", "mp", "--worker-cls", "qwen_cam82.worker.QwenCamWorker",
            "--enforce-eager", "--max-model-len", str(max_len), "--max-num-seqs", str(max_seqs),
            "--max-num-batched-tokens", str(min(1024, max_len)), "--gpu-memory-utilization", str(memory), "--seed", "1024",
-           "--block-size", str(KV_BLOCK_SIZE), "--no-enable-prefix-caching", "--kv-transfer-config", json.dumps(kv),
+           "--block-size", str(KV_BLOCK_SIZE), "--num-gpu-blocks-override", str(KV_NUM_BLOCKS),
+           "--no-enable-prefix-caching", "--kv-transfer-config", json.dumps(kv),
            "--compilation-config", json.dumps({"level": 0, "pass_config": {"enable_sequence_parallelism": sp}})]
     if p:
         cmd += ["--data-parallel-size", "1"]
@@ -104,8 +110,14 @@ def main():
         return
     if os.getenv("QWEN_CAM82_HOST") != host or os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error(f"Source cam82/env.sh {host}; do not hide/reindex physical cards")
-    if args.action == "serve" and importlib.util.find_spec("qwen_cam82.entrypoint") is None:
-        parser.error("Installed CAM82 adapter is old. Follow README 5.1 to install adapter 0.1.1 offline in BOTH containers")
+    if args.action == "serve":
+        try:
+            current_adapter = (md.version("qwen-vllm-cam82") == "0.1.2"
+                               and importlib.util.find_spec("qwen_cam82.native_kv") is not None)
+        except (md.PackageNotFoundError, ModuleNotFoundError):
+            current_adapter = False
+        if not current_adapter:
+            parser.error("Installed CAM82 adapter is old. Follow README 5.4 to install adapter 0.1.2 offline in BOTH containers")
     from qwen_cam82.policy import check_installation
     check_installation()
     if args.action == "serve":

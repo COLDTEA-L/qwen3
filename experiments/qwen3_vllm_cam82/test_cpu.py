@@ -22,6 +22,7 @@ from qwen_cam82 import policy
 from qwen_cam82.collectives import CamTP
 from qwen_cam82 import hooks
 from qwen_cam82 import startup
+from qwen_cam82 import native_kv
 import launch
 
 try:
@@ -74,6 +75,7 @@ class PolicyTests(unittest.TestCase):
     def startup_config(role="d8-228"):
         return NS(model_config=NS(enforce_eager=True, quantization=None, dtype="bfloat16",
                   hf_config=NS(model_type="qwen3_moe", num_experts=128, num_experts_per_tok=8)),
+                  cache_config=NS(block_size=64, num_gpu_blocks_override=2048),
                   parallel_config=NS(tensor_parallel_size=4, pipeline_parallel_size=1,
                     enable_expert_parallel=True, world_size=4, data_parallel_size=2,
                     data_parallel_size_local=1, data_parallel_rank=0 if role == "d8-228" else 1,
@@ -177,7 +179,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("228、238都执行（相同命令，容器内）", section)
         self.assertIn("--no-deps --no-build-isolation --no-index --force-reinstall", section)
         self.assertIn("git -c safe.directory=/ssd_2/yuanwenliu/sglang", section)
-        self.assertIn('assert v=="0.1.1"', section)
+        self.assertIn('assert v=="0.1.2"', section)
         self.assertIn("CAM82_DP_VISIBILITY", section)
         self.assertIn("CAM82_WORKER_DEVICE", section)
         self.assertNotIn("--global", section)
@@ -210,7 +212,8 @@ class PolicyTests(unittest.TestCase):
                 current[0] = self.local_rank
 
         names = ("vllm_ascend", "vllm_ascend.worker", "vllm_ascend.worker.worker_v1",
-                 "vllm", "vllm.distributed", "vllm.distributed.parallel_state")
+                 "vllm", "vllm.distributed", "vllm.distributed.parallel_state",
+                 "vllm.distributed.kv_transfer")
         modules = {name: ModuleType(name) for name in names}
         for name, module in modules.items():
             if "." in name:
@@ -224,12 +227,13 @@ class PolicyTests(unittest.TestCase):
         pg = modules["vllm.distributed.parallel_state"]
         pg.get_tp_group = lambda: "tp-group"
         pg.get_ep_group = lambda: NS(world_size=ep[0])
+        modules["vllm.distributed.kv_transfer"].get_kv_transfer_group = lambda: "native-connector"
         spec = importlib.util.spec_from_file_location("qwen_cam82._worker_test",
                                                      HERE / "adapter/qwen_cam82/worker.py")
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, modules), patch.object(policy, "check_installation"), \
              patch("qwen_cam82.collectives.CamTP", side_effect=lambda *args: NS(args=args)), \
-             patch.object(hooks, "install"):
+             patch.object(hooks, "install"), patch.object(native_kv, "install") as kv_install:
             spec.loader.exec_module(module)
             for role in policy.ROLES:
                 ep[0] = 4 if role == "p-228" else 8
@@ -243,6 +247,7 @@ class PolicyTests(unittest.TestCase):
                         self.assertEqual(worker.rank, 10 + local_rank)
                         self.assertEqual(cfg.parallel_config.data_parallel_rank_local, 0)
                         worker.init_device()
+                        kv_install.assert_called_with("native-connector")
                         self.assertEqual(current[0], policy.physical_device(role, local_rank))
                     count[0] = 4
                     with self.assertRaisesRegex(RuntimeError, "all8 physical"):
@@ -335,12 +340,14 @@ class PolicyTests(unittest.TestCase):
 
     def test_all_roles_and_modes_use_64_token_kv_blocks(self):
         self.assertEqual(launch.KV_BLOCK_SIZE, 64)
+        self.assertEqual(launch.KV_NUM_BLOCKS, native_kv.NUM_BLOCKS)
         for role in policy.ROLES:
             for mode in policy.MODES:
                 with self.subTest(role=role, mode=mode):
                     cmd, _ = launch.command(role, mode)
                     self.assertEqual(cmd.count("--block-size"), 1)
                     self.assertEqual(cmd[cmd.index("--block-size") + 1], "64")
+                    self.assertEqual(cmd[cmd.index("--num-gpu-blocks-override") + 1], "2048")
 
     def test_docs_explain_kv_block_units_and_correctness_gate(self):
         text = (HERE / "README.md").read_text()
@@ -962,6 +969,12 @@ class NumericTests(unittest.TestCase):
             self.assertEqual(runtime.reduce_scatter(x, 0).shape, (0, 4))
             with self.assertRaises(ValueError): runtime.all_gather(x, 2)
             with self.assertRaises(ValueError): runtime.reduce_scatter(Tensor(np.ones((3, 4), dtype=np.float32)), 0)
+
+
+def load_tests(loader, tests, pattern):
+    import test_native_kv
+    tests.addTests(loader.loadTestsFromModule(test_native_kv))
+    return tests
 
 
 if __name__ == "__main__":

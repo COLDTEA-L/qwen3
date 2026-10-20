@@ -1,6 +1,6 @@
 # Qwen3：CANN 8.2 / vLLM 原生 MoE + CAM TP 多路径实验
 
-更新：2026-10-16。本页为新独立环境，替代本实验后续执行入口；不在此前CANN9/Torch2.10容器里降级。用户已在228完成HCCL与CAM机内probe（退出码均0）；**238修正后probe及完整P/D模型实验尚待验收**，每个关口必须通过才继续。本文不实现统一控制器，不实现独立HBM KV Pool。
+更新：2026-10-20。本页为独立CANN8.2环境，不在此前CANN9/Torch2.10容器里降级。用户已在228完成HCCL与CAM机内probe（退出码均0）；完整P/D验收尚未通过。最新实测：off组同机P→D的四个TP rank发生`TransportMem::Read ret: 4`，P/D均有192/384条注册记录首地址非2MiB对齐。**已有镜像现在从5.4更新原生KV配置与适配包0.1.2，再重做第7节；不要因HTTP200继续压测。** 238机内probe仍需独立确认。本文不实现统一控制器，不实现独立HBM KV Pool。
 
 执行约定：标注“228、238都执行（相同命令）”的代码块，要在两台机器上各执行一次，不要求同一时刻执行；标注具体主机/窗口的代码块只在指定位置执行。新开SSH窗口默认位于宿主机；出现`docker exec`的代码块，第一行在宿主机执行，进入容器后再执行后续行。已经在该容器内时，不重复执行`docker exec`，也不在容器内运行Docker构建/导入命令。
 
@@ -389,7 +389,7 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 新脚本同时将`${ASCEND_OPP_PATH}/vendors/CAM`加入`ASCEND_CUSTOM_OPP_PATH`，将其`op_api/lib`目录加入`LD_LIBRARY_PATH`，并保持toolkit运行库优先。原因是CAM扩展运行时按文件名`libcust_opapi.so`加载API；仅在构建时按绝对路径加载通过，不代表运行时能够找到。缺少该配置时，会在第一次CAM调用报`aclnnAll2AllDetour ... not in libopapi.so`，即使`CamCommInit`已经成功。
 
-此前针对第6节probe的环境脚本修正，只需重新source，不改算子二进制。**但如果已经进入第7节并遇到D的`Explicit role/mode and full physical visibility required`，必须先执行下方5.1，将两机容器中的Python适配包更新到0.1.1；仅拉仓库或重新source不足以修复这个模型启动问题。** 已运行进程不会自动改变环境或重新加载代码。
+此前针对第6节probe的环境脚本修正，只需重新source，不改算子二进制。**但模型启动修复及当前KV保护需要更新两机容器中的Python适配包；最新要求0.1.2，见5.4（包含5.1的启动修复）。仅拉仓库或重新source不足以更新已安装包。** 已运行进程不会自动改变环境或重新加载代码。
 
 适配包在镜像里安装，不会仅因宿主机拉新代码而自动更新。后续纯Python修订可在新CAM82容器内离线执行`python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm_cam82/adapter`，记录HEAD并重跑关口；涉及CAM/CANN/native库版本变化必须重新构建镜像。不把适配包安装到旧CANN9/SGLang容器。
 
@@ -427,7 +427,7 @@ docker exec -it qwen3-vllm-cam82 bash
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
-python -c 'import importlib.metadata as m, importlib.util as u; v=m.version("qwen-vllm-cam82"); print("CAM82_ADAPTER_VERSION", v); assert v=="0.1.1"; print("CAM82_ENTRYPOINT", u.find_spec("qwen_cam82.entrypoint").origin)'
+python -c 'import importlib.metadata as m, importlib.util as u; v=m.version("qwen-vllm-cam82"); print("CAM82_ADAPTER_VERSION", v); assert v=="0.1.2"; print("CAM82_ENTRYPOINT", u.find_spec("qwen_cam82.entrypoint").origin)'
 ```
 
 仅228，容器内：
@@ -465,7 +465,7 @@ git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
 git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
 ```
 
-本次只修改挂载仓库的`launch.py`、`check.py`及文档/测试，不修改已安装适配包。**已完成5.1并确认适配包为0.1.1的两机，无需再安装包、构建镜像、编译算子或传输Docker。** 尚未完成5.1的机器仍需先完成5.1。
+5.2这次历史类名修复本身只修改挂载仓库的`launch.py`、`check.py`及文档/测试，不改已安装包；但当前部署还需执行5.4的KV保护修正，**已安装0.1.1的两机也必须离线更新到0.1.2**。无需构建镜像、编译算子或传输Docker。
 
 **228、238都执行（相同命令，宿主机新窗口）：** 已在实验容器内则跳过这一行：
 
@@ -519,6 +519,76 @@ python3 experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode off
 三条COMMAND都必须含`--block-size 64`。随后按第7节完整窗口命令重新启动P和两端D，两端D需同一轮启动，再启动proxy；新服务日志中的COMMAND也必须是64。已通过的第6节TP probe不必因本次纯启动参数修改重测。旧128-block结果保留诊断，不与新64-block结果混作性能基线。
 
 先做第7节chat正确性检查，确认回答42、正常结束且D日志没有KV搬运失败。通过后还要使用实际`usage.prompt_tokens`超过64、128的输入验证跨block搬运；直接请求P/D正常不能替代经proxy的完整P/D验证。旧版本connector在搬运异常后仍会标记任务完成，因此HTTP200不证明KV可用。若仍错误，保留本轮响应request ID、P/D首个搬运错误及其前后上下文，停止性能测试，继续核查搬运和block映射。不同TP模式比较时均保持64及其他预算一致。
+
+### 5.4 原生Ascend Mooncake：固定KV容量以对齐K/V，并阻止失败后继续生成
+
+**当前已经使用原生Ascend Mooncake，不是自定义KV搬运实现。** 0.10.2rc1普通Attention路径从一个连续`[K,V]` tensor分出K、V并分别注册；自动profile得到的block数不一定使K长度为2MiB整数倍，因而即使K首地址对齐，V首地址也可能不齐。这不是少export一个网卡变量。该版本DeepSeek MLA路径已有额外分配并对齐逻辑，不能直接照搬其模型配置当作Qwen3 GQA已验收。新版上游对普通Attention也采用独立K/V分配及显式对齐，但整体升级会改变已固定的CANN/Torch/CAM组合，本次不混装新版文件。
+
+本次优先使用vLLM原生`--num-gpu-blocks-override 2048`，保留`--block-size 64`：Qwen3-30B-A3B/Attention TP4/BF16下，单K或V的64-token block为16384字节，2048个block使每层K、V各32MiB，V相对K的偏移是2MiB整数倍。48层纯KV有效负载约3GiB/卡；这不是总HBM用量上限，还需权重、工作区和CAM窗口。2048是当前保守正确性验证预算，不是自动profile最大容量，也不代表P/D容量原则上必须相同。比较off/B/C时统一使用此预算，旧自动容量结果不能混作新基线。原生override可能绕过自动容量选择，不是防OOM保证；新环境或更大容量仍需验收。
+
+**不替换原生分配器，不改Attention绑定，不重写Mooncake注册/搬运实现。** 适配包0.1.2只在本实验worker的原生connector实例加保护：
+
+- 注册前核对全部48层、96个K/V区域的形状、BF16、连续性、真实首地址2MiB对齐且互不重叠；底层分配首地址仍可能不齐，因此不能仅靠容量公式宣称成功。失败输出`CAM82_KV_ALIGNMENT_FAILED`并停止，不把注册指针向下取整，不额外注册不属于tensor的内存，不静默重分配。
+- 成功注册后每个rank打印一次`CAM82_KV_REGIONS_OK ... regions=96 blocks=2048 ...`。这是内存布局验收，不证明KV已传输成功。
+- D捕获原生异步搬运异常后记录`CAM82_KV_TRANSFER_FAILED`；获取完成结果前后检查错误，发现失败则抛出`CAM82_KV_FAIL_STOP`，不让原生handler错误标记的done进入scheduler。保留原生P侧资源清理/ACK逻辑。该旧版适配选择让实验引擎失败停止，而非实现逐请求自动恢复；D8/EP8一侧失败后需停止自己的整轮服务再重新启动，不能沿用另一端继续测。
+- 新增Model Runner和Attention文件指纹保护；不编辑安装的原生源码，不关闭原有版本保护。
+
+参考：[固定vLLM的原生block数量覆盖及tensor容量计算](https://github.com/vllm-project/vllm/blob/v0.10.2/vllm/v1/core/kv_cache_utils.py)、[固定Ascend Model Runner](https://github.com/vllm-project/vllm-ascend/blob/048bfd55531909e1827616102dd40b4cf233f250/vllm_ascend/worker/model_runner_v1.py)、[新版上游K/V分配参考，非本实验安装版本](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/model_runner_v1.py)、[Mooncake 0.3.9 Ascend transport的2MiB注册要求](https://github.com/kvcache-ai/Mooncake/blob/v0.3.9/docs/source/design/transfer-engine/ascend_transport.md)。本实验特定旧版P4+D8组合没有官方已验证保证，下面仍需A2实测。
+
+**228、238都执行（相同操作，各服务前台窗口）：** Ctrl+C停止自己的proxy、P和两端D，确认自己的worker退出。CAM模式还需按第10节退出自己的relay；不清理他人进程，不reset NPU，不重启共享容器。
+
+**228、238都执行（相同命令，宿主机，Git代理按需先准备）：**
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
+git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
+```
+
+**228、238都执行（相同命令，各自宿主机新窗口）：** 已在正确容器内则跳过这一行：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+```
+
+**228、238都执行（相同命令，容器内）：** 必须更新已安装包，仅拉仓库不够；不重新构建或传输Docker、不重编CAM、不下载权重：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
+python -c 'import importlib.metadata as m; from qwen_cam82 import native_kv; print("CAM82_ADAPTER_VERSION", m.version("qwen-vllm-cam82")); assert m.version("qwen-vllm-cam82")=="0.1.2"; print("CAM82_NATIVE_KV_POLICY", native_kv.BLOCK_SIZE, native_kv.NUM_BLOCKS, native_kv.ALIGNMENT)'
+python experiments/qwen3_vllm_cam82/test_cpu.py
+```
+
+**仅228，容器内：**
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
+python experiments/qwen3_vllm_cam82/check.py --device --model
+```
+
+**仅238，容器内：**
+
+```bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
+python experiments/qwen3_vllm_cam82/check.py --device --model
+```
+
+预检查通过后按第7节原命令重新启动P、两端D、proxy；两端D同一轮启动，不等待单侧独立就绪。三条COMMAND都必须含`--block-size 64 --num-gpu-blocks-override 2048`。新日志中每个引擎应有4条`CAM82_KV_REGIONS_OK`（每个TP rank一条）；如果guard失败，停止，不删保护绕过，也不先压测。旧0.1.1包会在入口处明确拒绝启动。
+
+不用再复制数百行日志。**仅228，新开容器终端执行：**
+
+```bash
+python /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/report_kv.py --host 228
+```
+
+**仅238，新开容器终端执行：**
+
+```bash
+python /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/report_kv.py --host 238
+```
+
+每个服务只输出4行，选择该角色最新off日志（不是实时进程健康检查）。期望`registration_records=384 unaligned_records=0 guard_pass_records=4`；无注册记录不是通过。随后用第7节chat命令验证回答42，按响应request ID查看真实搬运记录，可给report追加`--request-id chatcmpl-实际ID`。P没有read成功记录正常；本次承接请求的D应有传输成功记录且无失败。只有布局检查、真实搬运、回答及跨block输入都通过，才继续CAM/性能比较。当前修改仅通过CPU/mock检查，不宣称已在A2修复成功；未对齐若清零而`ret: 4`仍出现，继续查内存交换/授权及实际注册地址范围，不能重复靠改容量猜测。
 
 ## 6 先验收CAM三种TP语义，再启动模型
 
