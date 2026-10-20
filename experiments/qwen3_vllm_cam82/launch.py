@@ -10,6 +10,10 @@ from pathlib import Path
 
 ROOT = "/ssd_2/yuanwenliu"
 ROLES = {"p-228": ("228", 0), "d8-228": ("228", 4), "d8-238": ("238", 0)}
+# The pinned Ascend attention backend uses 64-token physical blocks. Its
+# Mooncake connector consumes scheduler block IDs without expanding virtual
+# blocks, so a 128-token scheduler block would address the wrong physical block.
+KV_BLOCK_SIZE = 64
 
 
 def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, memory=0.75):
@@ -33,7 +37,7 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
            "--distributed-executor-backend", "mp", "--worker-cls", "qwen_cam82.worker.QwenCamWorker",
            "--enforce-eager", "--max-model-len", str(max_len), "--max-num-seqs", str(max_seqs),
            "--max-num-batched-tokens", str(min(1024, max_len)), "--gpu-memory-utilization", str(memory), "--seed", "1024",
-           "--block-size", "128", "--no-enable-prefix-caching", "--kv-transfer-config", json.dumps(kv),
+           "--block-size", str(KV_BLOCK_SIZE), "--no-enable-prefix-caching", "--kv-transfer-config", json.dumps(kv),
            "--compilation-config", json.dumps({"level": 0, "pass_config": {"enable_sequence_parallelism": sp}})]
     if p:
         cmd += ["--data-parallel-size", "1"]

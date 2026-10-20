@@ -333,6 +333,24 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(kv["kv_connector"], "MooncakeConnector")
                 self.assertEqual(kv["kv_connector_module_path"], "vllm_ascend.distributed.mooncake_connector")
 
+    def test_all_roles_and_modes_use_64_token_kv_blocks(self):
+        self.assertEqual(launch.KV_BLOCK_SIZE, 64)
+        for role in policy.ROLES:
+            for mode in policy.MODES:
+                with self.subTest(role=role, mode=mode):
+                    cmd, _ = launch.command(role, mode)
+                    self.assertEqual(cmd.count("--block-size"), 1)
+                    self.assertEqual(cmd[cmd.index("--block-size") + 1], "64")
+
+    def test_docs_explain_kv_block_units_and_correctness_gate(self):
+        text = (HERE / "README.md").read_text()
+        self.assertIn("### 5.3", text)
+        self.assertIn("--block-size 64", text)
+        self.assertIn("逻辑block", text)
+        self.assertIn("物理block", text)
+        self.assertIn("Compute 17 + 25. Give only the answer.", text)
+        self.assertIn("不能以HTTP200或不同TP模式输出相同作为正确性通过", text)
+
     def test_connector_factory_resolution_is_v1_and_never_constructs_transport(self):
         class Base:
             pass

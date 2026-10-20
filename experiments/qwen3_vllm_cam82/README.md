@@ -494,6 +494,32 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 需出现`CAM82_KV_CONNECTOR_OK vllm_ascend.distributed.mooncake_connector.MooncakeConnector`及`CAM82_CHECK_PASS`，然后按第7节原命令重新启动三个服务。新打印的COMMAND中应为`"kv_connector": "MooncakeConnector"`；若仍为V1后缀，运行的是旧启动脚本。不要手工给第三方模块添加别名或修改源码指纹来绕过检查。当前修正针对已确认的类名异常，完整P/D、EP8与真实KV迁移仍待验收。
 
+### 5.3 KV block单位对齐：P和两端D统一使用64
+
+2026-10-20，两机确认固定版本Attention后端`get_supported_block_size()`返回`[64]`。此前启动脚本设置`--block-size 128`，Model Runner会把一个128-token逻辑block拆成两个64-token物理block；而此版本MooncakeConnector直接使用scheduler的block ID乘以物理block字节数计算搬运地址，未展开逻辑block。这是可从固定版本源码识别的地址计算不一致，尚需A2端到端复测确认是否解释本次错误回答，不能声称已通过设备验证。各rank的block总数不同本身不等于错配。
+
+`launch.py`现对P、两端D及off/hccl-a2a/cam-detour统一固定`--block-size 64`，使逻辑block和物理block的编号单位一致。不是只改D，也不是把各rank的block总数强行设成相同。**只改挂载仓库中的启动脚本，不需要重建Docker、重新编译算子或重装适配包。** 不通过修改第三方源码或关闭检查绕过问题。
+
+**228、238都执行（相同命令，宿主机或当前实验容器内二选一）：** 先在各自前台窗口用Ctrl+C停止自己的proxy及三个模型服务，确认本轮worker退出；不清理他人的进程，不重启整个共享容器。准备Git联网代理后更新挂载仓库，有未提交修改时先处理，不覆盖：
+
+```bash
+cd /ssd_2/yuanwenliu/sglang
+git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
+git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
+```
+
+**228、238都执行（相同命令，仓库目录内）：** 以下只检查生成的命令，不启动模型，也不要求在容器内：
+
+```bash
+python3 experiments/qwen3_vllm_cam82/launch.py serve --role p-228 --tp-mode off --dry-run
+python3 experiments/qwen3_vllm_cam82/launch.py serve --role d8-228 --tp-mode off --dry-run
+python3 experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode off --dry-run
+```
+
+三条COMMAND都必须含`--block-size 64`。随后按第7节完整窗口命令重新启动P和两端D，两端D需同一轮启动，再启动proxy；新服务日志中的COMMAND也必须是64。已通过的第6节TP probe不必因本次纯启动参数修改重测。旧128-block结果保留诊断，不与新64-block结果混作性能基线。
+
+先做第7节chat正确性检查，确认回答42、正常结束且D日志没有KV搬运失败。通过后还要使用实际`usage.prompt_tokens`超过64、128的输入验证跨block搬运；直接请求P/D正常不能替代经proxy的完整P/D验证。旧版本connector在搬运异常后仍会标记任务完成，因此HTTP200不证明KV可用。若仍错误，保留本轮响应request ID、P/D首个搬运错误及其前后上下文，停止性能测试，继续核查搬运和block映射。不同TP模式比较时均保持64及其他预算一致。
+
 ## 6 先验收CAM三种TP语义，再启动模型
 
 2026-10-16用户反馈：228在取消上述HCCL变量覆盖并补齐CAM库/算子包路径后，HCCL与CAM两项测试退出码均为0。238尚未执行本轮修正后的测试；不能以228结果代替238验收。以下为每台机器独立的机内测试，228/238不需要同时启动。
@@ -582,18 +608,27 @@ python -u experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode o
 ```bash
 docker exec -it qwen3-vllm-cam82 bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
-curl --noproxy '*' -fsS http://10.155.205.228:30010/health
-curl --noproxy '*' -fsS http://10.155.205.228:30011/health
-curl --noproxy '*' -fsS http://10.155.205.238:30011/health
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsS http://10.155.205.228:30010/health
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsS http://10.155.205.228:30011/health
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsS http://10.155.205.238:30011/health
 python -u experiments/qwen3_vllm_cam82/launch.py proxy
 ```
 
-228窗口4发送请求、保存输出与负载（复用CPU客户端，不导入CANN9适配）：
+228窗口4先验证chat正确性。只有三处health都通过后才发送一个请求；proxy的healthcheck仅表示代理存活，不替代后端检查：
 
 ```bash
 docker exec -it qwen3-vllm-cam82 bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
-curl --noproxy '*' -fsS http://10.155.205.228:30080/v1/completions -H 'Content-Type: application/json' -d '{"model":"qwen3","prompt":"Explain prefill and decode separation.","max_tokens":32,"temperature":0}'
+curl --noproxy '*' --connect-timeout 3 --max-time 60 -sS http://10.155.205.228:30080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"qwen3","messages":[{"role":"user","content":"Compute 17 + 25. Give only the answer."}],"chat_template_kwargs":{"enable_thinking":false},"temperature":0.7,"top_p":0.8,"top_k":20,"seed":1024,"max_tokens":64,"stream":false}' -w '\nHTTP=%{http_code} 总耗时=%{time_total}s\n'
+```
+
+期望`choices[0].message.content`回答`42`并正常结束（`finish_reason=stop`），同时核对本轮D日志中KV搬运成功且无异常。若无关文本、重复符号、达到长度上限或超时，停止后续负载，记录返回request ID并提取P/D上下文；客户端超时不表示后台请求已经取消，不连续重发。必须再通过5.3的跨block输入验证，才进入下列记录输出与小负载步骤。
+
+**通过正确性检查后，228窗口4继续执行（已在容器内则跳过第一行）：** 复用CPU客户端，不导入CANN9适配。旧`compare_outputs.py`使用raw completion且只比较文本一致性，不是语义正确性检查，不能以HTTP200或不同TP模式输出相同作为正确性通过：
+
+```bash
+docker exec -it qwen3-vllm-cam82 bash
+source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 python experiments/qwen3_vllm/compare_outputs.py collect --url http://10.155.205.228:30080 --output experiments/qwen3_vllm_cam82/results/pd8-off-output.json
 python experiments/qwen3_vllm/workload.py --requests 20 --rps 0.2 --concurrency 2 --output "experiments/qwen3_vllm_cam82/results/pd8-off-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
