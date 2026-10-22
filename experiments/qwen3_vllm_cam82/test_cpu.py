@@ -421,7 +421,14 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launch.command(role, "cam-detour", max_seqs=8, capture_load_test=True)
             with self.assertRaises(ValueError):
-                launch.command(role, max_seqs=33, capture_load_test=True)
+                launch.command(role, max_seqs=65, capture_load_test=True)
+            cmd, _ = launch.command(role, max_seqs=64, capture_load_test=True)
+            self.assertEqual(cmd[cmd.index("--max-num-seqs") + 1], "64")
+            self.assertEqual(cmd[cmd.index("--num-gpu-blocks-override") + 1], "2048")
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=64)
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=64, max_len=2049, capture_load_test=True)
             with self.assertRaises(ValueError):
                 launch.command(role, max_seqs=32, max_len=8192, capture_load_test=True)
         with self.assertRaises(ValueError):
