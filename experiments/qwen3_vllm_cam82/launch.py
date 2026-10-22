@@ -112,12 +112,12 @@ def main():
         parser.error(f"Source cam82/env.sh {host}; do not hide/reindex physical cards")
     if args.action == "serve":
         try:
-            current_adapter = (md.version("qwen-vllm-cam82") == "0.1.3"
+            current_adapter = (md.version("qwen-vllm-cam82") == "0.1.4"
                                and importlib.util.find_spec("qwen_cam82.aligned_kv") is not None)
         except (md.PackageNotFoundError, ModuleNotFoundError):
             current_adapter = False
         if not current_adapter:
-            parser.error("Installed CAM82 adapter is old. Follow README 5.5 to install adapter 0.1.3 offline in BOTH containers")
+            parser.error("Installed CAM82 adapter is old. Follow README 5.5 to install adapter 0.1.4 offline in BOTH containers")
     from qwen_cam82.policy import check_installation
     check_installation()
     if args.action == "serve":

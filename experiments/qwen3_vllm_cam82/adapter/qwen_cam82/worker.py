@@ -48,3 +48,5 @@ class QwenCamWorker(NPUWorker):
             raise RuntimeError("EP membership does not match P4/D8 plan")
         self.cam_runtime = CamTP(get_tp_group(), ROLES[self.cam_role][1], self.cam_mode)
         install(self.cam_runtime, get_tp_group())
+        from .moe_trace import install as install_moe_trace
+        install_moe_trace()

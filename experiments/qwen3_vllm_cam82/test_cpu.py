@@ -180,7 +180,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("228、238都执行（相同命令，容器内）", section)
         self.assertIn("--no-deps --no-build-isolation --no-index --force-reinstall", section)
         self.assertIn("git -c safe.directory=/ssd_2/yuanwenliu/sglang", section)
-        self.assertIn('assert v=="0.1.3"', section)
+        self.assertIn('assert v=="0.1.4"', section)
         self.assertIn("CAM82_DP_VISIBILITY", section)
         self.assertIn("CAM82_WORKER_DEVICE", section)
         self.assertNotIn("--global", section)

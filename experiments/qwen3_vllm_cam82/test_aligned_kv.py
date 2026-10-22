@@ -231,7 +231,7 @@ class AlignedKVTests(unittest.TestCase):
         self.assertIn("0.1.3", text)
         self.assertIn("CAM82_KV_ALLOCATION_OK", text)
         self.assertIn("192MiB", text)
-        self.assertIn('version = "0.1.3"', (HERE / "adapter/pyproject.toml").read_text())
+        self.assertIn('version = "0.1.4"', (HERE / "adapter/pyproject.toml").read_text())
 
 
 if __name__ == "__main__":

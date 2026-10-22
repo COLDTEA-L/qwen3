@@ -1,6 +1,8 @@
 # Qwen3：CANN 8.2 / vLLM 原生 MoE + CAM TP 多路径实验
 
-更新：2026-10-20。本页为独立CANN8.2环境，不在此前CANN9/Torch2.10容器里降级。用户已在228完成HCCL与CAM机内probe（退出码均0）；完整P/D验收尚未通过。off组曾发生`TransportMem::Read ret: 4`，P/D均有192/384条注册记录首地址非2MiB对齐；随后固定2048 blocks后，P仍被0.1.2保护拦截：K基址为`0x12c5ded00600`，说明容量配置不能保证分配基址。**已有镜像现在从5.5更新到适配包0.1.3，显式分配对齐K/V，再重做第7节；不要因HTTP200继续压测。** 238机内probe仍需独立确认。本文不实现统一控制器，不实现独立HBM KV Pool。
+更新：2026-10-22。用户已反馈0.1.3原生off基线可回答42、KV注册检查通过，并在228及强制路由238的实验中观察到真实KV搬运成功；这属于功能和小负载验收，不是拥塞证明。当前适配包0.1.4保留KV对齐修复，增加可选的原生MoE通信描述采集。
+
+**当前实验入口：[原生MoE重放＋KV搬运实验](moe_kv/README.md)。按该文档采集、独立重放并分析，不执行本页旧第8节的TP分解对照。** 原有`hccl-a2a`/`cam-detour`代码和旧流程保留以便追溯，但不用于当前MoE/KV竞争实验。本页继续提供Docker、权重、原生P/D部署。本文不实现统一控制器，不实现独立HBM KV Pool。
 
 执行约定：标注“228、238都执行（相同命令）”的代码块，要在两台机器上各执行一次，不要求同一时刻执行；标注具体主机/窗口的代码块只在指定位置执行。新开SSH窗口默认位于宿主机；出现`docker exec`的代码块，第一行在宿主机执行，进入容器后再执行后续行。已经在该容器内时，不重复执行`docker exec`，也不在容器内运行Docker构建/导入命令。
 
@@ -389,7 +391,7 @@ python experiments/qwen3_vllm_cam82/test_cpu.py
 
 新脚本同时将`${ASCEND_OPP_PATH}/vendors/CAM`加入`ASCEND_CUSTOM_OPP_PATH`，将其`op_api/lib`目录加入`LD_LIBRARY_PATH`，并保持toolkit运行库优先。原因是CAM扩展运行时按文件名`libcust_opapi.so`加载API；仅在构建时按绝对路径加载通过，不代表运行时能够找到。缺少该配置时，会在第一次CAM调用报`aclnnAll2AllDetour ... not in libopapi.so`，即使`CamCommInit`已经成功。
 
-此前针对第6节probe的环境脚本修正，只需重新source，不改算子二进制。**但模型启动修复及当前KV对齐需要更新两机容器中的Python适配包；最新要求0.1.3，见5.5（包含此前启动修复）。仅拉仓库或重新source不足以更新已安装包。** 已运行进程不会自动改变环境或重新加载代码。
+此前针对第6节probe的环境脚本修正，只需重新source，不改算子二进制。**但模型启动修复及当前KV对齐需要更新两机容器中的Python适配包；最新要求0.1.4，见5.5（保留0.1.3对齐修复，增加可选MoE采集）。仅拉仓库或重新source不足以更新已安装包。** 已运行进程不会自动改变环境或重新加载代码。
 
 适配包在镜像里安装，不会仅因宿主机拉新代码而自动更新。后续纯Python修订可在新CAM82容器内离线执行`python -m pip install --no-deps --no-build-isolation --no-index -e experiments/qwen3_vllm_cam82/adapter`，记录HEAD并重跑关口；涉及CAM/CANN/native库版本变化必须重新构建镜像。不把适配包安装到旧CANN9/SGLang容器。
 
@@ -427,7 +429,7 @@ docker exec -it qwen3-vllm-cam82 bash
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
-python -c 'import importlib.metadata as m, importlib.util as u; v=m.version("qwen-vllm-cam82"); print("CAM82_ADAPTER_VERSION", v); assert v=="0.1.3"; print("CAM82_ENTRYPOINT", u.find_spec("qwen_cam82.entrypoint").origin)'
+python -c 'import importlib.metadata as m, importlib.util as u; v=m.version("qwen-vllm-cam82"); print("CAM82_ADAPTER_VERSION", v); assert v=="0.1.4"; print("CAM82_ENTRYPOINT", u.find_spec("qwen_cam82.entrypoint").origin)'
 ```
 
 仅228，容器内：
@@ -465,7 +467,7 @@ git -c safe.directory=/ssd_2/yuanwenliu/sglang status --short --branch
 git -c safe.directory=/ssd_2/yuanwenliu/sglang pull --ff-only origin feat/qwen3-cam-detour-conflict
 ```
 
-5.2这次历史类名修复本身只修改挂载仓库的`launch.py`、`check.py`及文档/测试，不改已安装包；但当前部署还需执行5.5的KV分配修正，**已安装0.1.1/0.1.2的两机也必须离线更新到0.1.3**。无需构建镜像、编译算子或传输Docker。
+5.2这次历史类名修复本身只修改挂载仓库的`launch.py`、`check.py`及文档/测试，不改已安装包；但当前部署还需执行5.5的安装步骤，**两机当前要求离线更新到0.1.4（包含0.1.3的KV分配修正）**。无需构建镜像、编译算子或传输Docker。
 
 **228、238都执行（相同命令，宿主机新窗口）：** 已在实验容器内则跳过这一行：
 
@@ -522,7 +524,7 @@ python3 experiments/qwen3_vllm_cam82/launch.py serve --role d8-238 --tp-mode off
 
 ### 5.4 原生Ascend Mooncake：固定KV容量以对齐K/V，并阻止失败后继续生成
 
-**历史说明：固定容量仅约束相对偏移，用户后续实测K基址仍不齐。本节的0.1.2原生分配尝试已由5.5补充为0.1.3显式对齐；当前不要只做容量配置。以下更新安装命令均安装最新0.1.3。**
+**历史说明：固定容量仅约束相对偏移，用户后续实测K基址仍不齐。本节的0.1.2原生分配尝试已由5.5补充为0.1.3显式对齐；当前不要只做容量配置。以下更新安装命令均安装最新0.1.4，保留该对齐修复。**
 
 **当前已经使用原生Ascend Mooncake，不是自定义KV搬运实现。** 0.10.2rc1普通Attention路径从一个连续`[K,V]` tensor分出K、V并分别注册；自动profile得到的block数不一定使K长度为2MiB整数倍，因而即使K首地址对齐，V首地址也可能不齐。这不是少export一个网卡变量。该版本DeepSeek MLA路径已有额外分配并对齐逻辑，不能直接照搬其模型配置当作Qwen3 GQA已验收。新版上游对普通Attention也采用独立K/V分配及显式对齐，但整体升级会改变已固定的CANN/Torch/CAM组合，本次不混装新版文件。
 
@@ -558,7 +560,7 @@ docker exec -it qwen3-vllm-cam82 bash
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
-python -c 'import importlib.metadata as m; from qwen_cam82 import native_kv; print("CAM82_ADAPTER_VERSION", m.version("qwen-vllm-cam82")); assert m.version("qwen-vllm-cam82")=="0.1.3"; print("CAM82_NATIVE_KV_POLICY", native_kv.BLOCK_SIZE, native_kv.NUM_BLOCKS, native_kv.ALIGNMENT)'
+python -c 'import importlib.metadata as m; from qwen_cam82 import native_kv; print("CAM82_ADAPTER_VERSION", m.version("qwen-vllm-cam82")); assert m.version("qwen-vllm-cam82")=="0.1.4"; print("CAM82_NATIVE_KV_POLICY", native_kv.BLOCK_SIZE, native_kv.NUM_BLOCKS, native_kv.ALIGNMENT)'
 python experiments/qwen3_vllm_cam82/test_cpu.py
 ```
 
@@ -621,7 +623,7 @@ docker exec -it qwen3-vllm-cam82 bash
 ```bash
 cd /ssd_2/yuanwenliu/sglang
 python -m pip install --no-deps --no-build-isolation --no-index --force-reinstall experiments/qwen3_vllm_cam82/adapter
-python -c 'import importlib.metadata as m; from qwen_cam82 import aligned_kv; print("CAM82_ADAPTER_VERSION", m.version("qwen-vllm-cam82")); assert m.version("qwen-vllm-cam82")=="0.1.3"; print("CAM82_ALIGNED_ALLOCATOR", aligned_kv.__file__)'
+python -c 'import importlib.metadata as m; from qwen_cam82 import aligned_kv; print("CAM82_ADAPTER_VERSION", m.version("qwen-vllm-cam82")); assert m.version("qwen-vllm-cam82")=="0.1.4"; print("CAM82_ALIGNED_ALLOCATOR", aligned_kv.__file__)'
 python experiments/qwen3_vllm_cam82/test_cpu.py
 ```
 
