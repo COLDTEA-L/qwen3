@@ -4,6 +4,8 @@
 
 已有低负载结果、想测试更强干扰时，按 [LOAD_SWEEP.md](LOAD_SWEEP.md) 执行：先延长 KV 覆盖，再采集更大真实 decode batch 的通信；不人为放大 split，也不改变 TP 算法。
 
+已有七组实测及早期服务记录见 [RESULTS.md](RESULTS.md)，机器可读台账见 [RESULTS_REPORTED.json](RESULTS_REPORTED.json)。后续优先开展真实必要KV的服务重叠验证，工作负载选择、短profiling与自动重叠分析计划见 [SERVING_PLAN.md](SERVING_PLAN.md)；这些后续工具尚未实现，不要把计划当成现成执行命令。
+
 当前加压指南已更新为每个D API 128个请求（采集max-model-len=1024）、重放KV2048 tokens。按LOAD_SWEEP第2节更新、第4节重新采集、第5节合并校验、第6节重放；这里README的第4节（合并）和第5节（smoke）编号与加压指南不同。并发机制与四组对照解释见LOAD_SWEEP第8节。无需重建镜像或重装已有0.1.4适配包。
 
 实现已做 CPU 单元测试；尚需在 228/238 验证 NPU、双机通信和 profiler。不能把本文中的示例百分比、CPU 测试夹具或程序存在本身当成实验结果。

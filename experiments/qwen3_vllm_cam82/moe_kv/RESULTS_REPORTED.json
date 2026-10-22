@@ -1,0 +1,569 @@
+{
+  "schema": 1,
+  "updated": "2026-10-22",
+  "provenance": "Transcribed user-reported measurements; not a fresh analysis of raw rank logs. Repeated pastes of a run_id are deduplicated.",
+  "percent_unit": "percent",
+  "aggregation": "Within each repeat: ratio of p50 durations. Across five repeats: median and min/max. Not a confidence interval or operation p99.",
+  "unknown": "null means not supplied, not zero",
+  "runs": [
+    {
+      "run_id": "native-kv1024-gap0-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "早期低负载",
+      "config": {
+        "trace_dir": "capture-native-01",
+        "client_requests_per_dp": null,
+        "prefix_tokens": 1024,
+        "kv_transfers": 200,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 256.5,
+      "host_submission_overlap_pct": [
+        48.89,
+        48.72,
+        49.13,
+        48.96,
+        49.97
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 0.71,
+          "min": 0.04,
+          "max": 1.6
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 1.84,
+          "min": -2.11,
+          "max": 4.78
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 2.41,
+          "min": 0.59,
+          "max": 2.78
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.31,
+          "min": -0.52,
+          "max": 0.94
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": -0.26,
+          "min": -1.99,
+          "max": 3.83
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 2.6677346766633026,
+          "combine_pct": 2.9590312871323743
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 2.1031094820881835,
+          "combine_pct": 4.103692751944843
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 1.754508707513569,
+          "combine_pct": 3.106299994247941
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": 2.7790297156338406,
+          "combine_pct": 3.607105551962464
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 0.4663780416056529,
+          "combine_pct": -1.5303253265717354
+        }
+      ],
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": null,
+      "note": null
+    },
+    {
+      "run_id": "native-kv1024-gap0-02",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "早期低负载 延长KV",
+      "config": {
+        "trace_dir": "capture-native-01",
+        "client_requests_per_dp": null,
+        "prefix_tokens": 1024,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": null,
+      "host_submission_overlap_pct": null,
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 1.49,
+          "min": 0.25,
+          "max": 2.88
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 1.47,
+          "min": 0.41,
+          "max": 2.49
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 0.42,
+          "min": -0.2,
+          "max": 2.5
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": -0.17,
+          "min": -0.82,
+          "max": 2.53
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": -0.19,
+          "min": -1.41,
+          "max": 2.56
+        }
+      },
+      "overlap_matched_rounds": null,
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": null,
+      "note": "500批及沿用trace来自上下文；用户本次报告未附manifest或载荷值，未独立核实。无低覆盖警告不能等同100%覆盖。"
+    },
+    {
+      "run_id": "dp8-kv1024-n500-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "每DP8请求",
+      "config": {
+        "trace_dir": "capture-dp8-01",
+        "client_requests_per_dp": 8,
+        "prefix_tokens": 1024,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 510.83,
+      "host_submission_overlap_pct": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 0.9,
+          "min": 0.3,
+          "max": 2.93
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 0.73,
+          "min": 0.19,
+          "max": 2.59
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 0.85,
+          "min": 0.66,
+          "max": 1.22
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.87,
+          "min": 0.1,
+          "max": 3.22
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": 1.17,
+          "min": -0.31,
+          "max": 1.55
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 2.93,
+          "combine_pct": 2.59
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 1.05,
+          "combine_pct": 0.72
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 0.85,
+          "combine_pct": 0.73
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": 0.3,
+          "combine_pct": 0.19
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 0.9,
+          "combine_pct": 1.39
+        }
+      ],
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": {
+        "min": 16,
+        "max": 16
+      },
+      "note": null
+    },
+    {
+      "run_id": "dp32-kv1024-n500-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "每DP32请求",
+      "config": {
+        "trace_dir": "capture-dp32-01",
+        "client_requests_per_dp": 32,
+        "prefix_tokens": 1024,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 2146.83,
+      "host_submission_overlap_pct": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 1.63,
+          "min": -0.13,
+          "max": 3.19
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 1.65,
+          "min": 0.49,
+          "max": 2.95
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 1.85,
+          "min": 1.52,
+          "max": 3.36
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.72,
+          "min": -3.54,
+          "max": 1.45
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": -0.22,
+          "min": -4.22,
+          "max": 1.47
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 3.19,
+          "combine_pct": 2.95
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 1.47,
+          "combine_pct": 0.84
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 1.65,
+          "combine_pct": 1.65
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": -0.13,
+          "combine_pct": 0.49
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 1.63,
+          "combine_pct": 1.85
+        }
+      ],
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": null,
+      "note": null
+    },
+    {
+      "run_id": "dp32-kv2048-n500-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "每DP32请求 大KV",
+      "config": {
+        "trace_dir": "capture-dp32-01",
+        "client_requests_per_dp": 32,
+        "prefix_tokens": 2048,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 2146.83,
+      "host_submission_overlap_pct": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 3.73,
+          "min": 3.66,
+          "max": 4.14
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 4.85,
+          "min": 4.19,
+          "max": 6.32
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 1.97,
+          "min": 1.12,
+          "max": 2.4
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.25,
+          "min": -1.39,
+          "max": 1.53
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": -0.27,
+          "min": -0.67,
+          "max": 1.66
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 3.66,
+          "combine_pct": 6.32
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 3.66,
+          "combine_pct": 4.66
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 3.73,
+          "combine_pct": 4.19
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": 4.14,
+          "combine_pct": 5.16
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 3.87,
+          "combine_pct": 4.85
+        }
+      ],
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": null,
+      "note": null
+    },
+    {
+      "run_id": "dp64-kv2048-n500-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "每DP64请求 大KV",
+      "config": {
+        "trace_dir": "capture-dp64-01",
+        "client_requests_per_dp": 64,
+        "prefix_tokens": 2048,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 4211.5,
+      "host_submission_overlap_pct": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 4.43,
+          "min": 2.33,
+          "max": 9.37
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 6.88,
+          "min": 4.39,
+          "max": 12.73
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 1.99,
+          "min": 0.81,
+          "max": 3.12
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.42,
+          "min": -1.35,
+          "max": 1
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": 0.54,
+          "min": -1.15,
+          "max": 1.18
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 3.27,
+          "combine_pct": 4.97
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 2.33,
+          "combine_pct": 4.39
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 6.15,
+          "combine_pct": 8.03
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": 9.37,
+          "combine_pct": 12.73
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 4.43,
+          "combine_pct": 6.88
+        }
+      ],
+      "serial_kv": {
+        "summary_pct": {
+          "median": 0.17,
+          "min": -0.42,
+          "max": 0.42
+        },
+        "K_p50_ms": [
+          7.131,
+          7.069,
+          7.149,
+          7.058,
+          7.152
+        ],
+        "MK_p50_ms": [
+          7.273,
+          7.24,
+          7.241,
+          7.278,
+          7.21
+        ],
+        "SERIAL_p50_ms": [
+          7.143,
+          7.085,
+          7.12,
+          7.088,
+          7.139
+        ],
+        "SERIAL_vs_K_pct": [
+          0.17,
+          0.21,
+          -0.42,
+          0.42,
+          -0.18
+        ],
+        "note": "用户查询输出，毫秒和百分比均经四舍五入；不要由显示毫秒反算后替换报告百分比。等待MoE未计入。"
+      },
+      "dispatch_input_rows_per_rank": null,
+      "note": null
+    },
+    {
+      "run_id": "dp128-kv2048-n500-01",
+      "source": "用户在本对话粘贴的报告，未读取实验机原始结果文件",
+      "load": "每DP128请求 大KV",
+      "config": {
+        "trace_dir": "capture-dp128-01",
+        "client_requests_per_dp": 128,
+        "prefix_tokens": 2048,
+        "kv_transfers": 500,
+        "iterations": 20,
+        "repeats": 5,
+        "kv_gap_ms": 0
+      },
+      "cross_host_KiB_per_dispatch_combine_pair": 7982,
+      "host_submission_overlap_pct": [
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "metrics": {
+        "dispatch_MK_vs_M_pct": {
+          "median": 6.23,
+          "min": 4.2,
+          "max": 6.71
+        },
+        "combine_MK_vs_M_pct": {
+          "median": 10.93,
+          "min": 9.29,
+          "max": 11.47
+        },
+        "kv_batch_MK_vs_K_pct": {
+          "median": 2.41,
+          "min": 1.88,
+          "max": 3.06
+        },
+        "dispatch_SERIAL_vs_M_pct": {
+          "median": 0.19,
+          "min": 0.01,
+          "max": 0.75
+        },
+        "combine_SERIAL_vs_M_pct": {
+          "median": 0.08,
+          "min": -0.23,
+          "max": 0.66
+        }
+      },
+      "overlap_matched_rounds": [
+        {
+          "repeat": 0,
+          "dispatch_pct": 4.49,
+          "combine_pct": 9.29
+        },
+        {
+          "repeat": 1,
+          "dispatch_pct": 4.2,
+          "combine_pct": 9.34
+        },
+        {
+          "repeat": 2,
+          "dispatch_pct": 6.31,
+          "combine_pct": 10.99
+        },
+        {
+          "repeat": 3,
+          "dispatch_pct": 6.71,
+          "combine_pct": 11.47
+        },
+        {
+          "repeat": 4,
+          "dispatch_pct": 6.23,
+          "combine_pct": 10.93
+        }
+      ],
+      "serial_kv": null,
+      "dispatch_input_rows_per_rank": null,
+      "note": "本档采集服务max-model-len由2048改为1024以满足固定KV容量；实际短prompt和128输出token方案不变，重放prefix_tokens仍2048。"
+    }
+  ]
+}
