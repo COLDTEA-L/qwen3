@@ -27,7 +27,7 @@ def command(role, mode="off", sp=True, model=None, max_len=2048, max_seqs=4, mem
         raise ValueError("Unknown role/mode")
     if capture_load_test and (role == "p-228" or mode != "off"):
         raise ValueError("Capture load test is only allowed on native off D roles")
-    limit = 64 if capture_load_test else 4
+    limit = 128 if capture_load_test else 4
     if max_len < 128 or not 1 <= max_seqs <= limit or not 0 < memory < 1:
         raise ValueError(f"Require context>=128, max-seqs1..{limit}, memory in (0,1)")
     if capture_load_test and max_len * max_seqs > KV_BLOCK_SIZE * KV_NUM_BLOCKS:
@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--capture-load-test", action="store_true",
-                        help="Opt-in native D capture only: allow max-num-seqs up to 64; not an OOM guarantee")
+                        help="Opt-in native D capture only: allow max-num-seqs up to 128 within KV capacity (128 requests require max-model-len<=1024); not an OOM guarantee")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.75)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

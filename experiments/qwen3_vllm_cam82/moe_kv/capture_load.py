@@ -32,8 +32,8 @@ def request(url, tokens, index=0, gate=None):
 
 
 def collect(tokens=128, requests_per_dp=1):
-    if not 16 <= tokens <= 512 or not 1 <= requests_per_dp <= 64:
-        raise ValueError("Use 16..512 tokens and 1..64 requests per DP")
+    if not 16 <= tokens <= 512 or not 1 <= requests_per_dp <= 128:
+        raise ValueError("Use 16..512 tokens and 1..128 requests per DP")
     total = 2 * requests_per_dp
     gate = threading.Barrier(total)
     with ThreadPoolExecutor(max_workers=total) as pool:
@@ -48,8 +48,8 @@ def main():
     p.add_argument("--requests-per-dp", type=int, default=1,
                    help="Concurrent requests to each D API; not measured engine batch size")
     a = p.parse_args()
-    if not 16 <= a.tokens <= 512 or not 1 <= a.requests_per_dp <= 64:
-        p.error("Use 16..512 tokens and 1..64 requests per DP")
+    if not 16 <= a.tokens <= 512 or not 1 <= a.requests_per_dp <= 128:
+        p.error("Use 16..512 tokens and 1..128 requests per DP")
     results = collect(a.tokens, a.requests_per_dp)
     print("CAPTURE_LOAD_COMPLETE", json.dumps({"requests": len(results),
           "requests_per_dp": a.requests_per_dp, "output_tokens_requested": a.tokens}), flush=True)

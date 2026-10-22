@@ -73,17 +73,17 @@ def fixture(root):
 
 
 class ReplayTests(unittest.TestCase):
-    def test_dp64_document_matches_capture_and_replay_parameters(self):
+    def test_dp128_document_matches_capture_and_replay_parameters(self):
         doc = (Path(__file__).parent / "LOAD_SWEEP.md").read_text()
         capture = doc.split("## 4 ", 1)[1].split("## 5 ", 1)[0]
         replay = doc.split("## 6 ", 1)[1].split("## 7 ", 1)[0]
-        self.assertEqual(capture.count("--max-num-seqs 64"), 2)
-        self.assertIn("--requests-per-dp 64 --tokens 128", capture)
-        self.assertIn('"requests": 128, "requests_per_dp": 64', capture)
+        self.assertEqual(capture.count("--max-num-seqs 128 --max-model-len 1024"), 2)
+        self.assertIn("--requests-per-dp 128 --tokens 128", capture)
+        self.assertIn('"requests": 256, "requests_per_dp": 128', capture)
         for host in (228, 238):
             line = next(x for x in replay.splitlines() if f"run.py --host {host}" in x)
-            self.assertIn("capture-dp64-01", line)
-            self.assertIn("--run-id dp64-kv2048-n500-01", line)
+            self.assertIn("capture-dp128-01", line)
+            self.assertIn("--run-id dp128-kv2048-n500-01", line)
             self.assertIn("--kv-transfers 500 --repeats 5 --prefix-tokens 2048", line)
         self.assertNotIn("capture-dp32-01", replay)
         self.assertNotRegex(doc, r"git\s+push")
@@ -94,12 +94,12 @@ class ReplayTests(unittest.TestCase):
             gate.wait(timeout=5)
             return (url, tokens, index)
         with patch.object(capture_load, "request", side_effect=fake_request):
-            result = capture_load.collect(128, 64)
-        self.assertEqual(len(result), 128)
+            result = capture_load.collect(128, 128)
+        self.assertEqual(len(result), 256)
         for host in (228, 238):
             self.assertEqual(sorted(i for url, tokens, i in result
-                                    if url == f"http://10.155.205.{host}:30011"), list(range(64)))
-        for tokens, requests in ((15, 8), (513, 8), (128, 0), (128, 65)):
+                                    if url == f"http://10.155.205.{host}:30011"), list(range(128)))
+        for tokens, requests in ((15, 8), (513, 8), (128, 0), (128, 129)):
             with self.assertRaises(ValueError):
                 capture_load.collect(tokens, requests)
 

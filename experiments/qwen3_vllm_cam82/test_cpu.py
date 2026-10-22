@@ -421,7 +421,16 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launch.command(role, "cam-detour", max_seqs=8, capture_load_test=True)
             with self.assertRaises(ValueError):
-                launch.command(role, max_seqs=65, capture_load_test=True)
+                launch.command(role, max_seqs=129, max_len=1024, capture_load_test=True)
+            cmd128, _ = launch.command(role, max_seqs=128, max_len=1024, capture_load_test=True)
+            self.assertEqual(cmd128[cmd128.index("--max-num-seqs") + 1], "128")
+            self.assertEqual(cmd128[cmd128.index("--max-model-len") + 1], "1024")
+            self.assertEqual(cmd128[cmd128.index("--num-gpu-blocks-override") + 1], "2048")
+            for length in (1025, 2048):
+                with self.assertRaisesRegex(ValueError, "KV token capacity"):
+                    launch.command(role, max_seqs=128, max_len=length, capture_load_test=True)
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=128, max_len=1024)
             cmd, _ = launch.command(role, max_seqs=64, capture_load_test=True)
             self.assertEqual(cmd[cmd.index("--max-num-seqs") + 1], "64")
             self.assertEqual(cmd[cmd.index("--num-gpu-blocks-override") + 1], "2048")
