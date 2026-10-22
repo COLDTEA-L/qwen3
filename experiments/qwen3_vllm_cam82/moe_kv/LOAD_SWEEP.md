@@ -1,6 +1,6 @@
-# 低负载之后：每个 D 实例并发32请求的 MoE 载荷实验
+# 32请求 MoE trace + 2048-token KV 搬运实验
 
-更新：2026-10-22。已完成8并发测试者：两机按第2节更新后，直接执行第4～6节；不必重做第3节。本次只修改文档，现有脚本已支持32并发。
+更新：2026-10-22。**已完成 `dp32-kv1024-n500-01` 者：两机按第2节更新文档后，直接从第6节开始。** 沿用两机现有 `capture-dp32-01`，不重做第3～5节，不拉起P/D/proxy。本次仅将模拟KV前缀从1024增到2048 tokens，运行代码已支持，不需重建Docker、重编算子或重装适配包。尚未有32请求trace者，先完成第4～5节。
 
 ## 1 要回答的问题
 
@@ -12,18 +12,21 @@
 
 本轮不改网络配置，不增添 TP 分解，不为了得到正数而筛选结果。
 
-8并发实测：每rank Dispatch输入16行，跨机载荷均值510.83KiB/对，主机提交重叠率100%；Dispatch +0.90%、Combine +0.73%、KV +0.85%，未观察到明显劣化。保留这轮作为对照。本轮直接提高到每个D实例32并发，KV仍1024 tokens、500批、gap=0，重放仍20个窗口、5轮，不开启profiling。目录中的`dp32`仅表示每个DP实例的客户端并发数，**不表示DP并行度32：配置仍是DP2、TP4、EP8，D总共8张卡**。
+8并发实测：每rank Dispatch输入16行，跨机载荷均值510.83KiB/对，主机提交重叠率100%；Dispatch +0.90%、Combine +0.73%、KV +0.85%，未观察到明显劣化。保留这轮作为对照。随后32请求的实测载荷达到2146.83KiB/对，主机提交重叠率100%，Dispatch +1.63%、Combine +1.65%、KV +1.85%，影响仍较小。本轮固定该32请求trace，仅把KV前缀提高到2048 tokens，仍500批、gap=0、20个重放窗口、5轮，不开启profiling。目录中的`dp32`仅表示每个DP实例的客户端并发数，**不表示DP并行度32：配置仍是DP2、TP4、EP8，D总共8张卡**。
 
 | 测试 | MoE trace | KV 前缀 | 每接收 rank 的 KV 次数 | 目的 |
 |---|---|---:|---:|---|
 | 已有结果 | capture-native-01 | 1024 | 200 | 保留原始低负载结果 |
 | 覆盖对照 | capture-native-01 | 1024 | 500 | 只延长 KV 窗口 |
 | 已完成8并发对照 | capture-dp8-01 | 1024 | 500 | 保留既有结果，不覆盖 |
-| 本轮32并发 | capture-dp32-01 | 1024 | 500 | 每个 D API 并发32请求，总共64请求 |
+| 已完成32请求对照 | capture-dp32-01 | 1024 | 500 | 保留 `dp32-kv1024-n500-01` |
+| 本轮增加KV | capture-dp32-01（不变） | 2048 | 500 | 单独增大每批KV，run-id为 `dp32-kv2048-n500-01` |
 
 每种测试内部仍有 M/K/MK/SERIAL 四组，iterations=20、repeats=5。**比较各自 MK/M，不把新 trace 的绝对耗时除以旧 trace 的 M。** 如果两个 trace 的重叠率差很多，先延长不足者的 KV 覆盖，再比较干扰程度。90%可作为覆盖目标，但仍须检查设备 trace，不能把 host 覆盖当作设备并发。
 
-1024-token KV 每批24MiB/rank，4接收rank合计96MiB；500批合计46.875GiB（每个 K/MK/SERIAL 阶段、每轮）。每rank仍是一个同步搬运调用完成后再提交下一批，不是500并发请求，不会分配500份缓存。
+1024-token KV 每批24MiB/rank，4接收rank合计96MiB；500批合计46.875GiB（每个 K/MK/SERIAL 阶段、每轮）。本轮2048-token KV每批48MiB/rank、四rank合计192MiB，500批合计93.75GiB（每个K/MK/SERIAL阶段、每轮）。每rank仍是一个同步搬运调用完成后再提交下一批，不是500并发请求，不会分配500份缓存。仍复用相同注册区域，每片传输长度由256KiB增至512KiB，不扩大192MiB/rank的有效缓冲区（另有对齐预留）。总搬运量翻倍不保证瞬时带宽翻倍，应结合K组实测吞吐判断。
+
+这里的2048仅是独立重放中模拟的KV前缀长度，**不修改采集时每请求生成128 token，也不修改每D实例32请求的采集并发**。
 
 ## 2 更新代码
 
@@ -142,7 +145,9 @@ docker exec qwen3-vllm-cam82 python /ssd_2/yuanwenliu/sglang/experiments/qwen3_v
 
 验证后在两个D前台窗口Ctrl+C，确认自己的workers退出，才能下一步。
 
-## 6 重放新 trace
+## 6 沿用32请求 trace，把KV前缀增加到2048
+
+可直接从本节开始。前提：两机已有且验证过相同的 `capture-dp32-01`，上一轮重放/profiling已退出，自己的P/D/proxy均已停止。只跑独立重放，不重新启动模型。已在容器内则跳过docker exec；本节给出两机完整命令。使用新run-id，不覆盖1024-token结果；若新run-id也已存在，两机统一换一个新名称。
 
 228实验窗口：
 
@@ -150,7 +155,7 @@ docker exec qwen3-vllm-cam82 python /ssd_2/yuanwenliu/sglang/experiments/qwen3_v
 docker exec -it qwen3-vllm-cam82 bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 228
 unset QWEN_MOE_CAPTURE_DIR
-python -u experiments/qwen3_vllm_cam82/moe_kv/run.py --host 228 --trace-dir experiments/qwen3_vllm_cam82/results/capture-dp32-01 --output-dir experiments/qwen3_vllm_cam82/results/moe-kv --run-id dp32-kv1024-n500-01 --iterations 20 --kv-transfers 500 --repeats 5 --prefix-tokens 1024 --kv-gap-ms 0
+python -u experiments/qwen3_vllm_cam82/moe_kv/run.py --host 228 --trace-dir experiments/qwen3_vllm_cam82/results/capture-dp32-01 --output-dir experiments/qwen3_vllm_cam82/results/moe-kv --run-id dp32-kv2048-n500-01 --iterations 20 --kv-transfers 500 --repeats 5 --prefix-tokens 2048 --kv-gap-ms 0
 ```
 
 238实验窗口（紧接228启动）：
@@ -159,16 +164,16 @@ python -u experiments/qwen3_vllm_cam82/moe_kv/run.py --host 228 --trace-dir expe
 docker exec -it qwen3-vllm-cam82 bash
 source /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/env.sh 238
 unset QWEN_MOE_CAPTURE_DIR
-python -u experiments/qwen3_vllm_cam82/moe_kv/run.py --host 238 --trace-dir experiments/qwen3_vllm_cam82/results/capture-dp32-01 --output-dir experiments/qwen3_vllm_cam82/results/moe-kv --run-id dp32-kv1024-n500-01 --iterations 20 --kv-transfers 500 --repeats 5 --prefix-tokens 1024 --kv-gap-ms 0
+python -u experiments/qwen3_vllm_cam82/moe_kv/run.py --host 238 --trace-dir experiments/qwen3_vllm_cam82/results/capture-dp32-01 --output-dir experiments/qwen3_vllm_cam82/results/moe-kv --run-id dp32-kv2048-n500-01 --iterations 20 --kv-transfers 500 --repeats 5 --prefix-tokens 2048 --kv-gap-ms 0
 ```
 
 全部完成后，228宿主机：
 
 ```bash
-mkdir -p /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv1024-n500-01
-scp 'yuanwenliu@10.155.205.238:/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv1024-n500-01/rank*.jsonl' /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv1024-n500-01/
-docker cp /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv1024-n500-01/. qwen3-vllm-cam82:/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv1024-n500-01/
-docker exec qwen3-vllm-cam82 python /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/moe_kv/analyze.py --run-dir /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv1024-n500-01 --output-dir /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv-analysis/dp32-kv1024-n500-01
+mkdir -p /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv2048-n500-01
+scp 'yuanwenliu@10.155.205.238:/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv2048-n500-01/rank*.jsonl' /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv2048-n500-01/
+docker cp /ssd_2/yuanwenliu/moe-kv-exchange/dp32-kv2048-n500-01/. qwen3-vllm-cam82:/ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv2048-n500-01/
+docker exec qwen3-vllm-cam82 python /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/moe_kv/analyze.py --run-dir /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv/dp32-kv2048-n500-01 --output-dir /ssd_2/yuanwenliu/sglang/experiments/qwen3_vllm_cam82/results/moe-kv-analysis/dp32-kv2048-n500-01
 ```
 
 ## 7 如何判读、是否继续加压
@@ -176,7 +181,7 @@ docker exec qwen3-vllm-cam82 python /ssd_2/yuanwenliu/sglang/experiments/qwen3_v
 1. 先检查完整性、KV正确性、真实载荷增加和覆盖率。失败run不能用于性能结论。
 2. 看每轮MK/M、KV的MK/K、重叠样本配对变化及SERIAL恢复。变慢必须超过同条件重复波动；不设必须达到10%之类的结论门槛。
 3. 若更大载荷仍仅变化几个百分点，这是有效结果。确认设备侧重叠和共享资源后，才能讨论硬件余量或竞争不敏感。
-4. 本轮只改变真实MoE采集负载；不要同时增加KV前缀、搬运次数或修改通信算法。如果32并发的MK主机覆盖率不足，先报告覆盖差异，再单独设计延长KV窗口的补充对照，不把不同覆盖率混成纯消息大小效应。
+4. 本轮只改变KV前缀长度，保持MoE trace、搬运次数、重放窗口数、轮数和通信算法不变。比较2048-token实验自身的MK/M、MK/K，再与1024-token实验的劣化率作对照；不能将不同KV大小的绝对批次耗时直接作为干扰增幅。两轮trace_sha256应相同。若覆盖率变化明显，须一并报告。
 5. 出现稳定干扰后，另做短profiling（主README第8节，使用对应新trace），区分CPU提交等待、设备串行、DMA/HBM竞争与物理链路拥塞。微基准不能直接推出TPOT劣化。
 
-现有脚本已通过CPU测试，8并发结果来自用户提供的实测；本次文档中的32并发模型采集、NPU重放和性能结果仍需228/238实测。恢复普通P/D时清除采集环境，不加`--capture-load-test`，按主部署文档运行。
+现有脚本已通过CPU测试，8及32请求、1024-token KV的结果来自用户实测；本次2048-token KV实验的性能结果仍需228/238实测。恢复普通P/D时清除采集环境，不加`--capture-load-test`，按主部署文档运行。
