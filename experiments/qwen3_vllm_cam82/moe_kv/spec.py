@@ -77,6 +77,16 @@ def load(root):
     return traces, validate(traces)
 
 
+def describe(traces):
+    """Measured routing payload, not a guess at request/active-token batch size."""
+    info = validate(traces)
+    rows = [op["shape"][0] for trace in traces for pair in trace["pairs"] for op in pair[1:2]]
+    return {**info, "cross_host_kib_per_dispatch_combine_pair":
+            info["cross_host_payload_bytes_per_window"] / info["pairs"] / 1024,
+            "dispatch_input_rows_per_rank_min": min(rows),
+            "dispatch_input_rows_per_rank_max": max(rows)}
+
+
 def kv_layout(prefix_tokens):
     if prefix_tokens <= 0 or prefix_tokens > 2048:
         raise ValueError("Require 1..2048 prefix tokens")
@@ -96,4 +106,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--trace-dir", required=True)
     args = parser.parse_args()
-    print(json.dumps(load(args.trace_dir)[1], indent=2))
+    print(json.dumps(describe(load(args.trace_dir)[0]), indent=2))

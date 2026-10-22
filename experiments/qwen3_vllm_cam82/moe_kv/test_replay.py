@@ -14,8 +14,9 @@ from types import ModuleType, SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
-from spec import CONDITIONS, digest, kv_layout, validate
+from spec import CONDITIONS, describe, digest, kv_layout, validate
 from analyze import analyze, markdown
+import capture_load
 
 
 def traces():
@@ -72,6 +73,40 @@ def fixture(root):
 
 
 class ReplayTests(unittest.TestCase):
+    def test_capture_concurrency_targets_both_dp_without_serial_submissions(self):
+        def fake_request(url, tokens, index, gate):
+            # If fewer than all requested workers are active this times out.
+            gate.wait(timeout=5)
+            return (url, tokens, index)
+        with patch.object(capture_load, "request", side_effect=fake_request):
+            result = capture_load.collect(128, 8)
+        self.assertEqual(len(result), 16)
+        for host in (228, 238):
+            self.assertEqual(sorted(i for url, tokens, i in result
+                                    if url == f"http://10.155.205.{host}:30011"), list(range(8)))
+        for tokens, requests in ((15, 8), (513, 8), (128, 0), (128, 33)):
+            with self.assertRaises(ValueError):
+                capture_load.collect(tokens, requests)
+
+    def test_measured_payload_description_does_not_change_trace_signature(self):
+        data = traces()
+        before = validate(data)
+        detail = describe(data)
+        for key in before:
+            self.assertEqual(detail[key], before[key])
+        self.assertEqual(detail["cross_host_kib_per_dispatch_combine_pair"],
+                         before["cross_host_payload_bytes_per_window"] / before["pairs"] / 1024)
+        self.assertLessEqual(detail["dispatch_input_rows_per_rank_min"],
+                             detail["dispatch_input_rows_per_rank_max"])
+
+    def test_report_exposes_overlap_and_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture(Path(tmp))
+            report = markdown(analyze(tmp))
+        self.assertIn("配对 Dispatch", report)
+        self.assertIn("100.00%", report)
+        self.assertIn("KiB", report)
+
     def test_nonuniform_native_shape_and_cross_host_bytes(self):
         info = validate(traces())
         self.assertGreater(info["cross_host_payload_bytes_per_window"], 0)

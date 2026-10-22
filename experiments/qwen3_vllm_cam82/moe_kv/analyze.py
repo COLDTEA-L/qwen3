@@ -162,7 +162,20 @@ def markdown(result):
         lines.append(f"| {name} | {statistics.median(values):+.2f}% | {min(values):+.2f}% ～ {max(values):+.2f}% |")
     lines += ["", "正数表示变慢，负数表示变快；需结合各轮波动判断，不能预设必须发生劣化。", "",
               "stream_ms 包含该 stream 上的依赖等待，不等于纯链路传输耗时。critical 为同一调用八个 rank 耗时的最大值。", "",
-              "## 检查事项", ""]
+              "## 重叠样本（主机提交时间口径）", "",
+              "仅比较重叠样本与 M 组同一 iteration/pair/op；不是设备重叠或物理拥塞证明。", "",
+              "| 轮次 | 主机提交重叠率 | 配对 Dispatch 变化 | 配对 Combine 变化 |",
+              "|---|---:|---:|---:|"]
+    def percent(value):
+        return "无样本" if value is None else f"{value:+.2f}%"
+    for row in result["rounds"]:
+        lines.append(f"| {row['repeat']} | {row['host_submission_overlap_fraction'] * 100:.2f}% | "
+                     f"{percent(row['dispatch_overlap_matched_slowdown_pct'])} | "
+                     f"{percent(row['combine_overlap_matched_slowdown_pct'])} |")
+    trace = result["manifest"]["trace"]
+    lines += ["", f"每对 Dispatch+Combine 的跨机载荷均值："
+              f"{trace['cross_host_payload_bytes_per_window'] / trace['pairs'] / 1024:.2f} KiB"
+              "（全 EP8、双向合计，不含计数 AllGather）。", "", "## 检查事项", ""]
     lines.extend("- " + w for w in result["warnings"])
     return "\n".join(lines) + "\n"
 

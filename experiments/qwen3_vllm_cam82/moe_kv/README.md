@@ -2,6 +2,8 @@
 
 更新：2026-10-22。目标是测量固定 MoE 通信工作量下，加入 KV 搬运后的完成耗时变化。复用已跑通的 CANN8.2、vLLM0.10.2、vLLM-Ascend0.10.2rc1、Mooncake v0.3.9 镜像。本实验不需要重建 Docker、拉取权重、编译 CAM 或接入多路径算子。TP 保持原生，原先 `hccl-a2a` / `cam-detour` 分组不用于本实验。
 
+已有低负载结果、想测试更强干扰时，按 [LOAD_SWEEP.md](LOAD_SWEEP.md) 执行：先延长 KV 覆盖，再采集更大真实 decode batch 的通信；不人为放大 split，也不改变 TP 算法。
+
 实现已做 CPU 单元测试；尚需在 228/238 验证 NPU、双机通信和 profiler。不能把本文中的示例百分比、CPU 测试夹具或程序存在本身当成实验结果。
 
 ## 1 实验边界与分组

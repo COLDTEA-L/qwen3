@@ -411,6 +411,22 @@ class PolicyTests(unittest.TestCase):
         for kw in ({"max_len": 0}, {"max_seqs": 8}, {"memory": 1}):
             with self.assertRaises(ValueError): launch.command("p-228", **kw)
 
+    def test_capture_load_budget_requires_explicit_native_d_opt_in(self):
+        for role in ("d8-228", "d8-238"):
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=8)
+            cmd, env = launch.command(role, max_seqs=8, capture_load_test=True)
+            self.assertEqual(cmd[cmd.index("--max-num-seqs") + 1], "8")
+            self.assertEqual(env["QWEN_CAM82_MODE"], "off")
+            with self.assertRaises(ValueError):
+                launch.command(role, "cam-detour", max_seqs=8, capture_load_test=True)
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=33, capture_load_test=True)
+            with self.assertRaises(ValueError):
+                launch.command(role, max_seqs=32, max_len=8192, capture_load_test=True)
+        with self.assertRaises(ValueError):
+            launch.command("p-228", max_seqs=8, capture_load_test=True)
+
     def test_pinned_ascend_source_if_available(self):
         root = HERE.parents[2] / "vllm-ascend-082/vllm_ascend"
         if not root.is_dir(): self.skipTest("Pinned upstream source snapshot absent")
